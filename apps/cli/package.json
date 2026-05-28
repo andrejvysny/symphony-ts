@@ -1,0 +1,21 @@
+{
+  "name": "@symphony/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "symphony": "./dist/main.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run --passWithNoTests",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@symphony/agent-backends": "workspace:*",
+    "@symphony/core": "workspace:*",
+    "@symphony/dashboard": "workspace:*",
+    "@symphony/shared": "workspace:*",
+    "@symphony/tracker": "workspace:*"
+  }
+}

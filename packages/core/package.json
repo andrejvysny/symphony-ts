@@ -1,0 +1,31 @@
+{
+  "name": "@symphony/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run --passWithNoTests",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@symphony/agent-backends": "workspace:*",
+    "@symphony/shared": "workspace:*",
+    "@symphony/tracker": "workspace:*",
+    "execa": "^9.6.1",
+    "liquidjs": "^10.27.0",
+    "pino": "^10.3.1",
+    "pino-pretty": "^13.0.0",
+    "simple-git": "^3.36.0",
+    "yaml": "^2.7.0",
+    "zod": "^4.4.3"
+  }
+}

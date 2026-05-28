@@ -1,0 +1,62 @@
+---
+# Symphony-TS workflow contract. Copy to WORKFLOW.md and customize.
+tracker:
+  kind: linear
+  # Right-click your Linear project → Copy URL; the slug is the trailing segment.
+  project_slug: "your-project-slug"
+  # Reads LINEAR_API_KEY from the environment when api_key is unset or "$LINEAR_API_KEY".
+  api_key: $LINEAR_API_KEY
+  # Symphony custom flow — set these up in Linear: Team Settings → Workflow.
+  active_states: [Todo, In Progress, Rework, Merging]
+  terminal_states: [Done, Closed, Canceled, Cancelled, Duplicate]
+  # Note: "Human Review" is intentionally NOT active — it parks work for a human.
+
+polling:
+  interval_ms: 5000
+
+workspace:
+  # Single shared repo (local path or git URL); every ticket gets a worktree off it.
+  repo: git@github.com:your-org/your-repo.git
+  root: ~/code/symphony-workspaces
+  branch_prefix: "symphony/"
+
+hooks:
+  # Runs once per new worktree. Install deps here.
+  after_create: |
+    if [ -f package.json ]; then npm ci || npm install; fi
+  timeout_ms: 120000
+
+agent:
+  backend: claude-sdk        # claude-sdk | claude-cli | codex-cli | opencode-cli
+  permission_mode: bypassPermissions   # full autonomy (high-trust)
+  max_concurrent_agents: 5
+  max_turns: 20
+  # model: claude-opus-4-8   # optional override
+  # max_budget_usd: 5        # optional per-turn budget cap (claude-sdk)
+
+server:
+  port: 4500                 # enables the dashboard at http://127.0.0.1:4500/
+---
+
+You are an autonomous engineer working on Linear issue {{ issue.identifier }} in an isolated git
+worktree on branch `symphony/{{ issue.identifier }}`.
+
+Title: {{ issue.title }}
+{% if issue.description %}
+{{ issue.description }}
+{% else %}
+(No description provided.)
+{% endif %}
+
+Your job:
+1. Implement the change end-to-end. Keep edits scoped to this issue.
+2. Run the project's build/tests/lints and make them pass before finishing.
+3. Commit your work with a concise message, push the `symphony/{{ issue.identifier }}` branch,
+   and open a pull request.
+4. Move the Linear issue to its next workflow state using the `linear_graphql` tool
+   (e.g. transition to "Human Review" or "Merging" per your team's process), and post a short
+   comment summarizing what you did and linking the PR.
+5. If you are blocked and genuinely need a human decision, say so explicitly and stop — do not guess.
+
+You have a `linear_graphql` tool that runs raw Linear GraphQL queries/mutations with Symphony's
+configured auth (use it for state transitions, comments, and PR metadata).
