@@ -1,5 +1,13 @@
-export type { Tracker, IssueCreator } from './tracker.js';
-export { supportsIssueCreation } from './tracker.js';
+export type {
+  Tracker,
+  IssueCreator,
+  CreateIssueInput,
+  BoardReader,
+  IssueWriter,
+  WorkflowStateInfo,
+  UploadInput,
+} from './tracker.js';
+export { supportsIssueCreation, supportsBoard, supportsIssueWriter } from './tracker.js';
 export { MemoryTracker, type MemoryTrackerOptions } from './memory/memory-tracker.js';
 export { LinearTracker, type LinearTrackerOptions } from './linear/adapter.js';
 export { LinearClient, type LinearClientOptions, type GraphqlResult } from './linear/client.js';

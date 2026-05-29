@@ -70,6 +70,21 @@ PRs itself via the `linear_graphql` tool; the orchestrator only reads ticket sta
 > The dashboard has **no authentication** — keep `server.host` on loopback (`127.0.0.1`). Binding to
 > a public host logs a warning and exposes the API to the network.
 
+### tmux supervision (CLI backends)
+
+Set `agent.tmux: true` to run each turn of a **CLI backend** (`claude-cli`/`codex-cli`/`opencode-cli`)
+inside a detached tmux session. You can then `tmux attach -t symphony-<issue-id>` to watch the agent
+live, and the raw stdout stream is `tee`'d to `<logs_root>/<issue-id>/<turn>/run.jsonl` for
+post-mortem. Terminating a session (dashboard or `POST /api/v1/sessions/:id/terminate`) runs
+`tmux kill-session`. Logs default to `<tmpdir>/symphony_logs`; override with `--logs-root <dir>` or
+`logs_root` in `WORKFLOW.md`. tmux has **no effect** on the in-process `claude-sdk` backend.
+
+```bash
+node apps/cli/dist/main.js ./WORKFLOW.md --port 4500 --logs-root ~/symphony-logs
+tmux ls                            # symphony-ENG-12
+tmux attach -t symphony-ENG-12     # watch it work
+```
+
 ## Conventions
 
 - TS strict (`exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`), ESM (`NodeNext`).

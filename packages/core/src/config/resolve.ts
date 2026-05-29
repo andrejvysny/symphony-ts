@@ -2,9 +2,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { configSchema, type ParsedConfig } from './schema.js';
 
-/** Resolved config: workspace.root is guaranteed absolute; `$VAR`/`~` expanded. */
+/** Resolved config: workspace.root + logs_root guaranteed absolute; `$VAR`/`~` expanded. */
 export type SymphonyConfig = ParsedConfig & {
   workspace: ParsedConfig['workspace'] & { root: string };
+  logs_root: string;
 };
 
 const VAR_RE = /^\$([A-Za-z_][A-Za-z0-9_]*)$/;
@@ -82,5 +83,9 @@ export function resolveConfig(parsed: ParsedConfig, workflowDir: string): Sympho
   const resolvedWorkspace = { ...workspace, root, ...(repo !== undefined ? { repo } : {}) };
   if (repo === undefined) delete resolvedWorkspace.repo;
 
-  return { ...parsed, tracker, workspace: resolvedWorkspace };
+  const rawLogsRoot = resolveVar(parsed.logs_root);
+  const logsRootBase = rawLogsRoot ?? path.join(os.tmpdir(), 'symphony_logs');
+  const logs_root = expandPath(logsRootBase, workflowDir);
+
+  return { ...parsed, tracker, workspace: resolvedWorkspace, logs_root };
 }

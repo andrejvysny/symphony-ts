@@ -272,6 +272,152 @@ describe('Orchestrator', () => {
     await flush(orchestrator);
   });
 
+  // A backend that flips the ticket to `finalState` during its turn (as a real agent would via
+  // linear_graphql), so the worker's post-success state refetch observes the new state.
+  function stateChangingBackend(tracker: MemoryTracker, id: string, finalState: string) {
+    return {
+      kind: 'state-changing',
+      async *run() {
+        const at = new Date(0).toISOString();
+        yield { type: 'session_started', sessionId: 's', at };
+        tracker.setState(id, finalState);
+        const result = {
+          status: 'success' as const,
+          sessionId: 's',
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+        };
+        yield { type: 'turn_completed' as const, at };
+        yield { type: 'result' as const, result, at };
+        return result;
+      },
+    };
+  }
+
+  function manualSetup(
+    tracker: MemoryTracker,
+    backend: unknown,
+    config: ReturnType<typeof testConfig>,
+  ) {
+    const wm = new FakeWorkspaceManager();
+    const orchestrator = new Orchestrator({
+      tracker,
+      backend: backend as never,
+      workspaceManager: wm,
+      config,
+      promptBuilder: new PromptBuilder('do {{ issue.identifier }}'),
+    });
+    return { orchestrator, wm };
+  }
+
+  it('cleans up and does not continue when a turn ends with the issue terminal', async () => {
+    const config = testConfig({
+      agent: { max_turns: 1, stall_timeout_ms: 0 },
+      tracker: {
+        kind: 'memory',
+        active_states: ['Todo', 'In Progress'],
+        terminal_states: ['Done', 'Canceled'],
+      },
+    });
+    const tracker = new MemoryTracker({
+      issues: [makeIssue({ id: 't1', state: 'Todo' })],
+      activeStates: config.tracker.active_states,
+      terminalStates: config.tracker.terminal_states,
+    });
+    const { orchestrator, wm } = manualSetup(
+      tracker,
+      stateChangingBackend(tracker, 't1', 'Done'),
+      config,
+    );
+
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+
+    const snap = orchestrator.snapshot();
+    expect(snap.counts.running).toBe(0);
+    expect(snap.counts.retrying).toBe(0); // no continuation re-check
+    expect(snap.counts.completed).toBe(1);
+    expect(wm.cleaned).toContain('t1'); // cleaned immediately on terminal completion
+  });
+
+  it('releases without cleanup when a turn ends with the issue non-active (non-terminal)', async () => {
+    const config = testConfig({
+      agent: { max_turns: 1, stall_timeout_ms: 0 },
+      tracker: {
+        kind: 'memory',
+        active_states: ['Todo', 'In Progress'],
+        terminal_states: ['Done', 'Canceled'],
+      },
+    });
+    const tracker = new MemoryTracker({
+      issues: [makeIssue({ id: 'na', state: 'Todo' })],
+      activeStates: config.tracker.active_states,
+      terminalStates: config.tracker.terminal_states,
+    });
+    const { orchestrator, wm } = manualSetup(
+      tracker,
+      stateChangingBackend(tracker, 'na', 'Backlog'),
+      config,
+    );
+
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+
+    const snap = orchestrator.snapshot();
+    expect(snap.counts.running).toBe(0);
+    expect(snap.counts.retrying).toBe(0);
+    expect(snap.counts.completed).toBe(0); // not a real completion
+    expect(wm.cleaned).not.toContain('na'); // preserved (not terminal)
+  });
+
+  it('blocks an issue after the continuation cap without a terminal state', async () => {
+    const backend = new MockBackend([{ status: 'success' }]); // always succeeds; issue stays active
+    const { orchestrator } = setup({
+      issues: [makeIssue({ id: 'c1', state: 'Todo' })],
+      backend,
+      config: { agent: { max_turns: 1, stall_timeout_ms: 0, max_continuations: 2 } },
+    });
+
+    await orchestrator.runOnce(); // dispatch #1 → exhausted → continuations=1, continuation scheduled
+    await flush(orchestrator);
+    expect(orchestrator.snapshot().counts.retrying).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1_000); // continuation fires → dispatch #2 → continuations=2 == cap
+    await flush(orchestrator);
+
+    const snap = orchestrator.snapshot();
+    expect(snap.counts.blocked).toBe(1);
+    expect(snap.counts.retrying).toBe(0);
+    expect(snap.blocked[0]!.reason).toContain('continuation cap');
+    expect(backend.calls.length).toBe(2);
+
+    await vi.advanceTimersByTimeAsync(5_000); // blocked → no further re-dispatch
+    await flush(orchestrator);
+    expect(backend.calls.length).toBe(2);
+  });
+
+  it('treats max_continuations: 0 as unlimited', async () => {
+    const backend = new MockBackend([{ status: 'success' }]);
+    const { orchestrator } = setup({
+      issues: [makeIssue({ id: 'u1', state: 'Todo' })],
+      backend,
+      config: { agent: { max_turns: 1, stall_timeout_ms: 0, max_continuations: 0 } },
+    });
+
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(1_000); // continuation re-checks keep firing
+      await flush(orchestrator);
+    }
+
+    const snap = orchestrator.snapshot();
+    expect(snap.counts.blocked).toBe(0);
+    expect(snap.counts.retrying).toBe(1); // still scheduling continuations
+    expect(backend.calls.length).toBeGreaterThan(2);
+  });
+
   it('does not dispatch a Todo issue blocked by a non-terminal blocker', async () => {
     const backend = new MockBackend([{ status: 'success' }]);
     const issue = makeIssue({
@@ -284,5 +430,87 @@ describe('Orchestrator', () => {
     await flush(orchestrator);
     expect(backend.calls.length).toBe(0);
     expect(orchestrator.snapshot().counts.running).toBe(0);
+  });
+
+  it('terminates a running session, holds it from re-dispatch, and resumes on demand', async () => {
+    const backend = new GatedBackend();
+    const { orchestrator } = setup({
+      issues: [makeIssue({ id: 'term1', state: 'Todo' })],
+      backend,
+    });
+
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+    expect(orchestrator.snapshot().counts.running).toBe(1);
+    expect(orchestrator.listSessions()).toHaveLength(1);
+
+    await orchestrator.terminate('term1');
+    await flush(orchestrator);
+    let snap = orchestrator.snapshot();
+    expect(snap.counts.running).toBe(0);
+    expect(snap.counts.paused).toBe(1);
+    expect(backend.running).toBe(0);
+
+    // held from re-dispatch while paused
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+    expect(orchestrator.snapshot().counts.running).toBe(0);
+
+    // resume → eligible again
+    orchestrator.resume('term1');
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+    snap = orchestrator.snapshot();
+    expect(snap.counts.running).toBe(1);
+    expect(snap.counts.paused).toBe(0);
+    backend.releaseAll();
+    await flush(orchestrator);
+  });
+
+  it('terminateAll stops every running session', async () => {
+    const backend = new GatedBackend();
+    const { orchestrator } = setup({
+      issues: [makeIssue({ id: 'ta', state: 'Todo' }), makeIssue({ id: 'tb', state: 'Todo' })],
+      backend,
+      config: { agent: { max_turns: 1, stall_timeout_ms: 0, max_concurrent_agents: 2 } },
+    });
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+    expect(orchestrator.snapshot().counts.running).toBe(2);
+
+    const res = await orchestrator.terminateAll();
+    await flush(orchestrator);
+    expect(res.terminated).toBe(2);
+    expect(orchestrator.snapshot().counts.running).toBe(0);
+    expect(orchestrator.snapshot().counts.paused).toBe(2);
+  });
+
+  it('streams live session events to subscribers and buffers them', async () => {
+    const gated = new GatedBackend();
+    const { orchestrator } = setup({
+      issues: [makeIssue({ id: 'g1', state: 'Todo' })],
+      backend: gated,
+    });
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+
+    // buffer holds the backlog; a late subscriber replays it
+    expect(orchestrator.getSessionLogs('g1').map((e) => e.type)).toContain('session_started');
+    const replayed: string[] = [];
+    orchestrator.subscribeLogs('g1', (e) => replayed.push(e.type));
+    expect(replayed).toContain('session_started');
+    await orchestrator.terminate('g1');
+    await flush(orchestrator);
+
+    // live streaming across a full mock run
+    const live: string[] = [];
+    const o2 = setup({
+      issues: [makeIssue({ id: 'L1', state: 'Todo' })],
+      backend: new MockBackend([{ status: 'success' }]),
+    }).orchestrator;
+    o2.subscribeLogs('L1', (e) => live.push(e.type));
+    await o2.runOnce();
+    await flush(o2);
+    expect(live).toContain('turn_completed');
   });
 });

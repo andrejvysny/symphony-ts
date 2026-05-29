@@ -31,8 +31,16 @@ agent:
   permission_mode: bypassPermissions   # full autonomy (high-trust)
   max_concurrent_agents: 5
   max_turns: 20
+  max_continuations: 50       # cap consecutive continuations before blocking the issue (0 = unlimited)
   # model: claude-opus-4-8   # optional override
   # max_budget_usd: 5        # optional per-turn budget cap (claude-sdk)
+  # tmux: true               # CLI backends only: run each turn in a tmux session you can
+                             # `tmux attach -t symphony-<id>`; raw stdout is logged to logs_root.
+                             # No effect on the in-process claude-sdk backend.
+
+# Root for raw tmux session logs (run.jsonl/err.log per turn). Default: <tmpdir>/symphony_logs.
+# Override at launch with `--logs-root <dir>`.
+# logs_root: ~/code/symphony-logs
 
 server:
   port: 4500                 # enables the dashboard at http://127.0.0.1:4500/

@@ -15,6 +15,11 @@ export { createBackend, type BackendKind, type BackendFactoryOptions } from './r
 export { CliStreamJsonBackend, cliBackendFor } from './cli-stream-json/cli-backend.js';
 export { runAgentDef } from './cli-stream-json/engine.js';
 export {
+  defaultTmuxController,
+  tmuxAvailable,
+  type TmuxController,
+} from './cli-stream-json/tmux.js';
+export {
   AGENT_DEFS,
   claudeCliDef,
   codexCliDef,

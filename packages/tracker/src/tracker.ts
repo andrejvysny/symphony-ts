@@ -18,16 +18,62 @@ export interface Tracker {
   fetchIssueStatesByIds(ids: string[]): Promise<IssueStateRef[]>;
 }
 
-/** Optional write capability — used by the `symphony ticket create` command only. */
+export interface CreateIssueInput {
+  title: string;
+  description?: string;
+  stateName?: string;
+  stateId?: string;
+  priority?: number;
+  /** Asset links appended to the description as markdown (from uploadFile). */
+  attachments?: Array<{ url: string; title: string }>;
+}
+
+/** Optional write capability — used by the `ticket create` command and the dashboard. */
 export interface IssueCreator {
-  createIssue(input: {
-    title: string;
-    description?: string;
-    stateName?: string;
-    priority?: number;
-  }): Promise<NormalizedIssue>;
+  createIssue(input: CreateIssueInput): Promise<NormalizedIssue>;
 }
 
 export function supportsIssueCreation(t: Tracker): t is Tracker & IssueCreator {
   return typeof (t as Partial<IssueCreator>).createIssue === 'function';
+}
+
+/** A workflow state (kanban column). */
+export interface WorkflowStateInfo {
+  id: string;
+  name: string;
+  /** triage | backlog | unstarted | started | completed | canceled */
+  type: string;
+  position: number;
+  color?: string;
+}
+
+/** Read the full board (all issues + the workflow states) — operator/dashboard path. */
+export interface BoardReader {
+  fetchAllIssues(): Promise<NormalizedIssue[]>;
+  listWorkflowStates(): Promise<WorkflowStateInfo[]>;
+}
+
+export function supportsBoard(t: Tracker): t is Tracker & BoardReader {
+  const b = t as Partial<BoardReader>;
+  return typeof b.fetchAllIssues === 'function' && typeof b.listWorkflowStates === 'function';
+}
+
+export interface UploadInput {
+  filename: string;
+  contentType: string;
+  data: Buffer;
+}
+
+/** Operator write capability (state moves, comments, attachments) — dashboard path. */
+export interface IssueWriter {
+  updateIssueState(issueId: string, stateId: string): Promise<void>;
+  addComment(issueId: string, body: string): Promise<void>;
+  /** Upload a file to the tracker; returns the permanent asset URL. */
+  uploadFile(input: UploadInput): Promise<{ assetUrl: string }>;
+  attachToIssue(issueId: string, url: string, title?: string): Promise<void>;
+}
+
+export function supportsIssueWriter(t: Tracker): t is Tracker & IssueWriter {
+  const w = t as Partial<IssueWriter>;
+  return typeof w.updateIssueState === 'function' && typeof w.uploadFile === 'function';
 }

@@ -54,6 +54,8 @@ export const agentSchema = z
     allowed_tools: z.array(z.string()).optional(),
     disallowed_tools: z.array(z.string()).optional(),
     max_turns: z.number().int().positive().default(20),
+    /** Cap on consecutive continuation re-dispatches before an issue is blocked. 0 disables. */
+    max_continuations: z.number().int().nonnegative().default(50),
     max_concurrent_agents: z.number().int().positive().default(10),
     max_concurrent_agents_by_state: z.record(z.string(), z.number().int().positive()).default({}),
     max_retry_backoff_ms: z.number().int().positive().default(300_000),
@@ -62,6 +64,8 @@ export const agentSchema = z
     stall_timeout_ms: z.number().int().nonnegative().default(300_000),
     /** CLI backends: override the binary/base command. */
     command: z.string().optional(),
+    /** CLI backends: supervise the agent under a tmux session (attach + raw log file). */
+    tmux: z.boolean().default(false),
     /** Optional env var name holding the agent API key (parse-only in v1; host login used). */
     api_key_env: z.string().optional(),
   })
@@ -93,6 +97,8 @@ export const workerSchema = z
 export const configSchema = z
   .object({
     tracker: trackerSchema,
+    /** Root dir for raw tmux session logs. Resolved to <tmpdir>/symphony_logs when omitted. */
+    logs_root: z.string().optional(),
     polling: pollingSchema.prefault({}),
     workspace: workspaceSchema.prefault({}),
     hooks: hooksSchema.prefault({}),

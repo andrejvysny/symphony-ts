@@ -14,6 +14,7 @@ import {
 } from './dispatch.js';
 import {
   createState,
+  EVENT_BUFFER_CAP,
   newRunningEntry,
   type OrchestratorState,
   type RunningEntry,
@@ -36,7 +37,7 @@ export interface OrchestratorDeps {
   now?: () => number;
 }
 
-type StopIntent = 'terminal' | 'nonactive' | 'stall';
+type StopIntent = 'terminal' | 'nonactive' | 'stall' | 'manual';
 
 export class Orchestrator {
   private readonly state: OrchestratorState = createState();
@@ -52,6 +53,10 @@ export class Orchestrator {
   private config: SymphonyConfig;
   private readonly mcpConfig: McpConfig | undefined;
   private readonly stopIntents = new Map<string, StopIntent>();
+  /** Operator-terminated issues held back from re-dispatch until moved/resumed. */
+  private readonly paused = new Set<string>();
+  /** Per-issue live-log subscribers (SSE). */
+  private readonly logSubscribers = new Map<string, Set<(ev: AgentEvent) => void>>();
   private queue: Promise<unknown> = Promise.resolve();
   private running = false;
   private stopping = false;
@@ -113,6 +118,92 @@ export class Orchestrator {
   /** Wait for the internal mutation queue to drain (test helper). */
   async settle(): Promise<void> {
     await this.queue.catch(() => undefined);
+  }
+
+  // ---- operator control (dashboard) ----
+
+  /** Stop a running session and hold the issue back from re-dispatch. */
+  async terminate(issueId: string): Promise<{ terminated: boolean }> {
+    return this.enqueue(async () => {
+      this.paused.add(issueId);
+      const retry = this.state.retryAttempts.get(issueId);
+      if (retry) {
+        clearTimeout(retry.timer);
+        this.state.retryAttempts.delete(issueId);
+        this.state.claimed.delete(issueId);
+      }
+      const entry = this.state.running.get(issueId);
+      if (!entry) return { terminated: false };
+      this.stopIntents.set(issueId, 'manual');
+      // Abort propagates to the backend, which owns tmux kill-session (agent-neutral).
+      entry.abort.abort();
+      this.logger.info(
+        { issue_id: issueId, issue_identifier: entry.identifier },
+        'operator terminate requested',
+      );
+      return { terminated: true };
+    });
+  }
+
+  /** Terminate every running session. */
+  async terminateAll(): Promise<{ terminated: number }> {
+    const ids = [...this.state.running.keys()];
+    let n = 0;
+    for (const id of ids) {
+      const r = await this.terminate(id);
+      if (r.terminated) n += 1;
+    }
+    return { terminated: n };
+  }
+
+  /** Allow a previously-terminated issue to be dispatched again. */
+  resume(issueId: string): void {
+    this.paused.delete(issueId);
+  }
+
+  /** Subscribe to a running session's live events; replays the buffer first. Returns unsubscribe. */
+  subscribeLogs(issueId: string, cb: (ev: AgentEvent) => void): () => void {
+    const entry = this.state.running.get(issueId);
+    if (entry) for (const ev of entry.eventBuffer) cb(ev);
+    let set = this.logSubscribers.get(issueId);
+    if (!set) {
+      set = new Set();
+      this.logSubscribers.set(issueId, set);
+    }
+    set.add(cb);
+    return () => {
+      const s = this.logSubscribers.get(issueId);
+      if (s) {
+        s.delete(cb);
+        if (s.size === 0) this.logSubscribers.delete(issueId);
+      }
+    };
+  }
+
+  /** Snapshot of a session's buffered events. */
+  getSessionLogs(issueId: string): AgentEvent[] {
+    return this.state.running.get(issueId)?.eventBuffer.slice() ?? [];
+  }
+
+  /** List currently-running sessions for the dashboard. */
+  listSessions(): SessionInfo[] {
+    return [...this.state.running.values()].map((e) => ({
+      issue_id: e.issue.id,
+      issue_identifier: e.identifier,
+      state: e.issue.state,
+      session_id: e.sessionId,
+      tmux_session: e.tmuxSession,
+      pid: e.pid,
+      started_at: new Date(e.startedAt).toISOString(),
+      last_event: e.lastEvent,
+      turn_count: e.turnCount,
+      workspace_path: e.workspacePath,
+      tokens: {
+        input_tokens: e.tokens.inputTokens,
+        output_tokens: e.tokens.outputTokens,
+        total_tokens: e.tokens.totalTokens,
+      },
+    }));
   }
 
   // ---- serial mutation queue ----
@@ -203,6 +294,7 @@ export class Orchestrator {
     if (this.state.running.has(issue.id)) return false;
     if (this.state.claimed.has(issue.id)) return false;
     if (this.state.blocked.has(issue.id)) return false;
+    if (this.paused.has(issue.id)) return false;
     if (this.runningCountForState(issue.state) >= this.maxForState(issue.state)) return false;
     if (issue.state.toLowerCase() === 'todo' && todoBlockedByNonTerminal(issue, terminal))
       return false;
@@ -214,6 +306,9 @@ export class Orchestrator {
     this.state.running.set(issue.id, entry);
     this.state.claimed.add(issue.id);
     this.state.retryAttempts.delete(issue.id);
+    // attempt 0 == fresh poll dispatch (not a continuation/failure retry): reset the run of
+    // consecutive continuations so the cap only counts uninterrupted continuation re-dispatches.
+    if (attempt === 0) this.state.continuations.delete(issue.id);
 
     const log = this.logger.child({ issue_id: issue.id, issue_identifier: issue.identifier });
     log.info({ attempt }, 'dispatching issue');
@@ -228,6 +323,10 @@ export class Orchestrator {
       },
       onWorktree: (p: string) => {
         entry.workspacePath = p;
+      },
+      onProcess: (info: { pid?: number; tmuxSession?: string }) => {
+        if (info.pid !== undefined) entry.pid = info.pid;
+        if (info.tmuxSession !== undefined) entry.tmuxSession = info.tmuxSession;
       },
     };
 
@@ -251,6 +350,8 @@ export class Orchestrator {
   private onAgentEvent(entry: RunningEntry, ev: AgentEvent): void {
     entry.lastEvent = ev.type;
     entry.lastEventAt = this.now();
+    entry.eventBuffer.push(ev);
+    if (entry.eventBuffer.length > EVENT_BUFFER_CAP) entry.eventBuffer.shift();
     if (ev.type === 'turn_completed') entry.turnCount += 1;
     if (ev.type === 'usage') {
       const delta = integrateUsage(entry.tokens, ev);
@@ -259,6 +360,8 @@ export class Orchestrator {
       this.state.totals.totalTokens += delta.totalTokens;
       if (ev.rateLimits !== undefined) this.state.rateLimits = ev.rateLimits;
     }
+    const subs = this.logSubscribers.get(entry.issue.id);
+    if (subs) for (const cb of subs) cb(ev);
   }
 
   // ---- worker exit ----
@@ -282,11 +385,19 @@ export class Orchestrator {
       this.stopIntents.delete(issueId);
       if (intent === 'terminal') {
         this.state.claimed.delete(issueId);
+        this.state.continuations.delete(issueId);
         await this.workspaceManager.cleanup(entry.issue).catch(() => undefined);
         log.info({}, 'stopped: terminal state; workspace cleaned');
       } else if (intent === 'nonactive') {
         this.state.claimed.delete(issueId);
+        this.state.continuations.delete(issueId);
         log.info({}, 'stopped: non-active state');
+      } else if (intent === 'manual') {
+        // Operator terminate: release claim, keep the workspace, no retry. The
+        // `paused` set (added by terminate) holds it back from re-dispatch.
+        this.state.claimed.delete(issueId);
+        this.state.continuations.delete(issueId);
+        log.info({}, 'stopped: operator terminated; held from re-dispatch');
       } else {
         this.scheduleRetry(entry.issue, entry.retryAttempt + 1, 'failure', 'stall');
         log.warn({}, 'stalled; scheduled retry');
@@ -307,11 +418,46 @@ export class Orchestrator {
         });
         log.warn({ reason: outcome.reason }, 'issue blocked on operator input');
         return;
-      case 'completed':
-        this.state.completed.add(issueId);
-        this.scheduleRetry(entry.issue, 1, 'continuation');
-        log.info({}, 'turn completed; continuation re-check scheduled');
+      case 'completed': {
+        switch (outcome.disposition) {
+          case 'terminal':
+            this.state.completed.add(issueId);
+            this.state.claimed.delete(issueId);
+            this.state.continuations.delete(issueId);
+            await this.workspaceManager.cleanup(entry.issue).catch(() => undefined);
+            log.info({}, 'turn completed; issue terminal, workspace cleaned');
+            return;
+          case 'nonactive':
+            this.state.claimed.delete(issueId);
+            this.state.continuations.delete(issueId);
+            log.info({}, 'turn completed; issue left active, released');
+            return;
+          case 'exhausted': {
+            const continuations = (this.state.continuations.get(issueId) ?? 0) + 1;
+            const cap = this.config.agent.max_continuations;
+            if (cap > 0 && continuations >= cap) {
+              this.state.continuations.delete(issueId);
+              this.state.blocked.set(issueId, {
+                issue: entry.issue,
+                identifier: entry.identifier,
+                reason: 'continuation cap reached without terminal state',
+                blockedAt: this.now(),
+              });
+              log.warn(
+                { continuations, cap },
+                'continuation cap reached; blocking issue for operator input',
+              );
+              return;
+            }
+            this.state.continuations.set(issueId, continuations);
+            this.state.completed.add(issueId);
+            this.scheduleRetry(entry.issue, 1, 'continuation');
+            log.info({ continuations }, 'turn completed; continuation re-check scheduled');
+            return;
+          }
+        }
         return;
+      }
       case 'failed':
         this.scheduleRetry(entry.issue, entry.retryAttempt + 1, 'failure', outcome.error);
         log.warn(
@@ -364,6 +510,7 @@ export class Orchestrator {
     const fresh = candidates.find((c) => c.id === issueId);
     if (!fresh || !active.has(fresh.state)) {
       this.state.claimed.delete(issueId);
+      this.state.continuations.delete(issueId);
       return;
     }
     if (this.availableSlots() > 0) {
@@ -462,7 +609,9 @@ export class Orchestrator {
         blocked: this.state.blocked.size,
         retrying: this.state.retryAttempts.size,
         completed: this.state.completed.size,
+        paused: this.paused.size,
       },
+      paused: [...this.paused],
       running: [...this.state.running.values()].map((e) => ({
         issue_id: e.issue.id,
         issue_identifier: e.identifier,
@@ -515,3 +664,17 @@ export class Orchestrator {
 }
 
 export type OrchestratorSnapshot = ReturnType<Orchestrator['snapshot']>;
+
+export interface SessionInfo {
+  issue_id: string;
+  issue_identifier: string;
+  state: string;
+  session_id: string | null;
+  tmux_session: string | null;
+  pid: number | null;
+  started_at: string;
+  last_event: string | null;
+  turn_count: number;
+  workspace_path: string | null;
+  tokens: { input_tokens: number; output_tokens: number; total_tokens: number };
+}

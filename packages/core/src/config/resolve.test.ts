@@ -74,4 +74,25 @@ describe('config parse + resolve', () => {
   it('rejects unknown top-level keys (strict)', () => {
     expect(() => parseConfig({ tracker: { kind: 'memory' }, bogus: 1 })).toThrow();
   });
+
+  it('defaults agent.tmux to false and logs_root to an absolute tmpdir path', () => {
+    const c = resolveConfig(parseConfig({ tracker: { kind: 'memory' } }), '/tmp');
+    expect(c.agent.tmux).toBe(false);
+    expect(c.logs_root).toMatch(/symphony_logs$/);
+    expect(c.logs_root.startsWith('/')).toBe(true);
+  });
+
+  it('expands ~/$VAR and absolutizes logs_root', () => {
+    process.env['SYMPHONY_TEST_TOKEN'] = 'logs-here';
+    const fromVar = resolveConfig(
+      parseConfig({ tracker: { kind: 'memory' }, logs_root: '$SYMPHONY_TEST_TOKEN' }),
+      '/base',
+    );
+    expect(fromVar.logs_root).toBe('/base/logs-here');
+    const rel = resolveConfig(
+      parseConfig({ tracker: { kind: 'memory' }, logs_root: 'mylogs' }),
+      '/base',
+    );
+    expect(rel.logs_root).toBe('/base/mylogs');
+  });
 });

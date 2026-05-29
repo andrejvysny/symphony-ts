@@ -49,6 +49,7 @@ export {
   Orchestrator,
   type OrchestratorDeps,
   type OrchestratorSnapshot,
+  type SessionInfo,
 } from './orchestrator/orchestrator.js';
 export {
   runWorker,
@@ -70,3 +71,15 @@ export { createLogger } from './observability/pino-logger.js';
 
 // runtime factories
 export { buildTracker, buildBackend, buildWorkspaceManager, buildMcpConfig } from './runtime.js';
+
+// dashboard source
+export {
+  buildDashboardSource,
+  type DashboardSource,
+  type BoardData,
+  type BoardStateDTO,
+  type BoardIssueDTO,
+  type IssueStatus,
+  type CreateTicketInput,
+  type CreateTicketFile,
+} from './dashboard-source.js';

@@ -38,6 +38,12 @@ export interface RunOptions {
   signal?: AbortSignal;
   /** Per-turn timeout (SPEC codex.turn_timeout_ms equivalent). */
   timeoutMs?: number;
+  /**
+   * CLI backends only: supervise the run under a tmux session. Presence enables it.
+   * `sessionName` is the tmux target (e.g. `symphony-ENG-12`); `logDir` receives the
+   * raw `run.jsonl`/`err.log`/`exit.code` files. Ignored by in-process backends.
+   */
+  tmux?: { sessionName: string; logDir: string };
 }
 
 export interface RunResult {
@@ -62,6 +68,7 @@ export type AgentEvent =
       pid?: number;
       at: string;
     }
+  | { type: 'process_started'; pid?: number; tmuxSession?: string; at: string }
   | { type: 'text_delta'; text: string; at: string }
   | { type: 'tool_use'; toolName: string; toolUseId: string; input: unknown; at: string }
   | { type: 'tool_result'; toolUseId: string; isError: boolean; content: unknown; at: string }

@@ -1,3 +1,4 @@
+import path from 'node:path';
 import type {
   AgentEvent,
   CodingAgentBackend,
@@ -12,8 +13,16 @@ import { PromptBuilder } from '../prompt/builder.js';
 import { assertCwdIsWorkspace } from '../workspace/path-safety.js';
 import type { IWorkspaceManager } from '../workspace/manager.js';
 
+/**
+ * Why a worker's turn loop ended cleanly:
+ * - `terminal`   — the issue reached a terminal state (clean up, do not continue)
+ * - `nonactive`  — the issue left active without going terminal (release, preserve workspace)
+ * - `exhausted`  — still active with turns spent (continuation re-dispatch warranted)
+ */
+export type CompletedDisposition = 'terminal' | 'nonactive' | 'exhausted';
+
 export type WorkerOutcome =
-  | { kind: 'completed' }
+  | { kind: 'completed'; disposition: CompletedDisposition }
   | { kind: 'blocked'; reason: string }
   | { kind: 'failed'; error: string; category?: ErrorCategory }
   | { kind: 'aborted' };
@@ -34,6 +43,7 @@ export interface WorkerContext {
   emit: (event: AgentEvent) => void;
   onSession: (sessionId: string) => void;
   onWorktree: (path: string) => void;
+  onProcess: (info: { pid?: number; tmuxSession?: string }) => void;
 }
 
 /**
@@ -44,6 +54,7 @@ export async function runWorker(deps: WorkerDeps, ctx: WorkerContext): Promise<W
   const { tracker, workspaceManager, promptBuilder, backend, config } = deps;
   const { issue } = ctx;
   const activeStates = new Set(config.tracker.active_states);
+  const terminalStates = new Set(config.tracker.terminal_states);
   const maxTurns = config.agent.max_turns;
 
   let ws;
@@ -85,6 +96,14 @@ export async function runWorker(deps: WorkerDeps, ctx: WorkerContext): Promise<W
         runOpts.disallowedTools = config.agent.disallowed_tools;
       if (deps.mcpConfig !== undefined) runOpts.mcpConfig = deps.mcpConfig;
       if (sessionId !== undefined) runOpts.resumeSessionId = sessionId;
+      // tmux supervision applies to CLI subprocess backends only; the in-process
+      // claude-sdk backend has no subprocess to attach/log/kill.
+      if (config.agent.tmux && config.agent.backend !== 'claude-sdk') {
+        runOpts.tmux = {
+          sessionName: `symphony-${issue.identifier}`,
+          logDir: path.join(config.logs_root, issue.identifier, String(turn)),
+        };
+      }
 
       let turnResult: RunResult | undefined;
       for await (const ev of backend.run(runOpts)) {
@@ -92,6 +111,11 @@ export async function runWorker(deps: WorkerDeps, ctx: WorkerContext): Promise<W
         if (ev.type === 'session_started') {
           sessionId = ev.sessionId;
           ctx.onSession(ev.sessionId);
+        } else if (ev.type === 'process_started') {
+          ctx.onProcess({
+            ...(ev.pid !== undefined ? { pid: ev.pid } : {}),
+            ...(ev.tmuxSession !== undefined ? { tmuxSession: ev.tmuxSession } : {}),
+          });
         } else if (ev.type === 'result') {
           turnResult = ev.result;
         }
@@ -122,14 +146,17 @@ export async function runWorker(deps: WorkerDeps, ctx: WorkerContext): Promise<W
             return { kind: 'failed', error: `state refresh failed: ${(e as Error).message}` };
           }
           const ref = refs.find((r) => r.id === issue.id);
-          if (!ref || !activeStates.has(ref.state)) return { kind: 'completed' };
-          if (turn >= maxTurns) return { kind: 'completed' };
+          if (!ref || !activeStates.has(ref.state)) {
+            const disposition = ref && terminalStates.has(ref.state) ? 'terminal' : 'nonactive';
+            return { kind: 'completed', disposition };
+          }
+          if (turn >= maxTurns) return { kind: 'completed', disposition: 'exhausted' };
           // still active and turns remain → continuation turn
           break;
         }
       }
     }
-    return { kind: 'completed' };
+    return { kind: 'completed', disposition: 'exhausted' };
   } finally {
     await workspaceManager.runAfterRun(issue, ws).catch(() => undefined);
   }

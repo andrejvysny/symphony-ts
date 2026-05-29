@@ -1,6 +1,7 @@
 import path from 'node:path';
 import {
   buildBackend,
+  buildDashboardSource,
   buildMcpConfig,
   buildTracker,
   buildWorkspaceManager,
@@ -84,6 +85,8 @@ async function runOrchestrator(args: Args): Promise<void> {
   activeLogger = logger;
   const store = new WorkflowStore(workflowPath(args), logger);
   const { config, promptBody } = await store.load();
+  const logsRootFlag = args.flags.get('logs-root');
+  if (typeof logsRootFlag === 'string') config.logs_root = path.resolve(logsRootFlag);
   store.start();
   logger.info(
     { tracker: config.tracker.kind, backend: config.agent.backend },
@@ -111,7 +114,7 @@ async function runOrchestrator(args: Args): Promise<void> {
   const port = typeof portFlag === 'string' ? Number(portFlag) : (config.server?.port ?? undefined);
   let dashboard: Awaited<ReturnType<typeof startDashboard>> | undefined;
   if (port !== undefined && Number.isFinite(port)) {
-    dashboard = await startDashboard(orchestrator, {
+    dashboard = await startDashboard(buildDashboardSource(orchestrator, tracker), {
       port,
       host: config.server?.host ?? '127.0.0.1',
       onNonLoopback: (h) =>
@@ -153,6 +156,7 @@ Usage:
 
 Options:
   --port <n>      Start the observability dashboard + JSON API on this port
+  --logs-root <d> Dir for raw tmux session logs (default: <tmpdir>/symphony_logs)
   --json-logs     Emit structured JSON logs instead of pretty logs
   --workflow <p>  Path to WORKFLOW.md (default: ./WORKFLOW.md)
   --version, -v   Print version

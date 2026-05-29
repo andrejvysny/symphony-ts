@@ -30,9 +30,12 @@ stream-json family (claude/codex/opencode).
 - `packages/agent-backends` — the agent-agnostic seam. `backend.ts` defines `CodingAgentBackend` +
   the normalized `AgentEvent` vocabulary. `claude-sdk/` wraps the SDK; `cli-stream-json/` is the
   declarative-adapter + one-engine pattern (`agent-defs.ts` = config per agent, `engine.ts` spawns +
-  parses, `parsers/` normalize each agent's JSONL).
+  parses, `parsers/` normalize each agent's JSONL). With `agent.tmux`, `engine.ts` instead runs the
+  CLI agent under a tmux session (`tmux.ts` = injectable `TmuxController`), `tee`s raw stdout to a
+  `run.jsonl` log it tails, and emits a `process_started` event (pid + session name). tmux ownership
+  lives entirely here — the orchestrator only records the session name and aborts (abort → kill).
 - `packages/tracker` — `Tracker` interface, `LinearTracker` (read-mostly + `createIssue`), `MemoryTracker`
-  (tests/demos), and the shared `linear_graphql` tool executor.
+  (tests), and the shared `linear_graphql` tool executor.
 - `packages/core/src/workspace` — git worktrees off one shared clone, hooks, path-safety invariants.
 - `packages/core/src/config` + `workflow` — zod schema, `$VAR`/`~` resolution, WorkflowStore hot-reload
   (1s stat-poll, last-known-good on bad reload).
@@ -55,4 +58,8 @@ stream-json family (claude/codex/opencode).
 - Agent cwd must equal the worktree path; worktree must stay under `workspace.root` (path-safety).
 - Tracker is read-only from the orchestrator — the agent moves tickets via `linear_graphql`.
 - Token accounting uses absolute totals only (delta = max(0, next − lastReported)).
-- Workspaces/branches are preserved after success; cleaned only when the issue goes terminal.
+- Workspaces/branches are preserved after success; cleaned only when the issue goes terminal. A
+  turn that ends with the issue already terminal is cleaned up immediately (no continuation).
+- Continuation re-dispatch is bounded by `agent.max_continuations` (default 50, `0` = unlimited):
+  after that many consecutive continuations without reaching a terminal state, the issue is moved to
+  `blocked` for operator input instead of looping (prevents runaway token spend).
