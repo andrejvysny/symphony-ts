@@ -34,6 +34,16 @@ export function parseWorkflowFile(content: string): { frontMatter: unknown; prom
   return { frontMatter: {}, promptBody: content.trim() };
 }
 
+/**
+ * Serialize front matter + body back into a WORKFLOW.md string (inverse of
+ * {@link parseWorkflowFile}). The body is the rendered prompt template; front matter is the raw
+ * (pre-resolution) config object so `$VAR` indirection and secrets are never expanded on disk.
+ */
+export function serializeWorkflowFile(frontMatter: unknown, promptBody: string): string {
+  const yaml = YAML.stringify(frontMatter ?? {}).trimEnd();
+  return `---\n${yaml}\n---\n\n${promptBody.trim()}\n`;
+}
+
 export async function loadWorkflowFile(filePath: string): Promise<LoadedWorkflow> {
   const abs = path.resolve(filePath);
   let content: string;

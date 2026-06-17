@@ -16,6 +16,17 @@ tracker:
   # The agent may only set active_states + review_state (never terminal). Rename to match your board.
   review_state: Human Review
 
+# Switchable projects for the dashboard's project switcher. The ACTIVE project is whichever
+# project_id/repo sit in `tracker`/`workspace` above; this registry is the set you can switch to
+# (and what "+ New project" appends to). Each entry = a Plane project_id + its own repo folder.
+# Switching live re-points the orchestrator (no restart). Managed from the dashboard — listed here
+# so it survives restarts.
+projects:
+  # - name: Backend
+  #   project_id: "another-project-uuid"
+  #   repo: ~/code/backend
+  #   identifier: BE          # optional, informational
+
 polling:
   interval_ms: 5000
 

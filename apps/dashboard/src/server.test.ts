@@ -58,7 +58,47 @@ function fakeSource(): DashboardSource {
     }),
     findIssue: (id) => snap.running.find((r) => r.issue_identifier === id) ?? null,
     requestRefresh: vi.fn().mockResolvedValue({ coalesced: false }),
-    capabilities: () => ({ board: true, write: true }),
+    capabilities: () => ({ board: true, write: true, projects: true, settings: true }),
+    listProjects: vi.fn().mockResolvedValue({
+      projects: [
+        {
+          project_id: 'p1',
+          name: 'Alpha',
+          identifier: 'ALP',
+          repo: '~/code/alpha',
+          registered: true,
+          active: true,
+        },
+      ],
+      active_project_id: 'p1',
+    }),
+    switchProject: vi.fn().mockResolvedValue({ switched: true }),
+    createProject: vi.fn().mockResolvedValue({
+      project_id: 'p2',
+      name: 'Beta',
+      identifier: 'BET',
+      repo: '~/code/beta',
+      registered: true,
+      active: false,
+    }),
+    getSettings: () => ({
+      agent: {
+        backend: 'claude-sdk',
+        model: null,
+        permission_mode: 'bypassPermissions',
+        max_turns: 6,
+        max_continuations: 50,
+        max_concurrent_agents: 4,
+        max_retry_backoff_ms: 300_000,
+        turn_timeout_ms: 3_600_000,
+        stall_timeout_ms: 900_000,
+        tmux: false,
+        max_budget_usd: null,
+      },
+      polling: { interval_ms: 5000 },
+      workspace: { branch_prefix: 'symphony/' },
+    }),
+    updateSettings: vi.fn().mockResolvedValue(undefined),
     getBoard: vi.fn().mockResolvedValue({
       states: [
         { id: 's1', name: 'Todo', type: 'unstarted', position: 0 },
@@ -330,6 +370,90 @@ describe('dashboard server', () => {
     expect(source.moveIssue).toHaveBeenCalledWith('i1', 's2');
     const bad = await app.inject({ method: 'PATCH', url: '/api/v1/issues/i1/state', payload: {} });
     expect(bad.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it('exposes capabilities', async () => {
+    const app = createDashboardServer(fakeSource());
+    const res = await app.inject({ method: 'GET', url: '/api/v1/capabilities' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ board: true, write: true, projects: true, settings: true });
+    expect((await app.inject({ method: 'POST', url: '/api/v1/capabilities' })).statusCode).toBe(
+      405,
+    );
+    await app.close();
+  });
+
+  it('lists projects and switches the active one', async () => {
+    const source = fakeSource();
+    const app = createDashboardServer(source);
+    const list = await app.inject({ method: 'GET', url: '/api/v1/projects' });
+    expect(list.statusCode).toBe(200);
+    expect(list.json().active_project_id).toBe('p1');
+    expect(list.json().projects[0].name).toBe('Alpha');
+
+    const sw = await app.inject({
+      method: 'POST',
+      url: '/api/v1/projects/switch',
+      payload: { projectId: 'p2' },
+    });
+    expect(sw.statusCode).toBe(200);
+    expect(sw.json().switched).toBe(true);
+    expect(source.switchProject).toHaveBeenCalledWith('p2');
+
+    const bad = await app.inject({
+      method: 'POST',
+      url: '/api/v1/projects/switch',
+      payload: {},
+    });
+    expect(bad.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it('creates a project and validates required fields', async () => {
+    const source = fakeSource();
+    const app = createDashboardServer(source);
+    const ok = await app.inject({
+      method: 'POST',
+      url: '/api/v1/projects',
+      payload: { name: 'Beta', identifier: 'BET', repo: '~/code/beta' },
+    });
+    expect(ok.statusCode).toBe(201);
+    expect(ok.json().project_id).toBe('p2');
+    expect(source.createProject).toHaveBeenCalledWith({
+      name: 'Beta',
+      identifier: 'BET',
+      repo: '~/code/beta',
+    });
+    const missing = await app.inject({
+      method: 'POST',
+      url: '/api/v1/projects',
+      payload: { name: 'Beta' },
+    });
+    expect(missing.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it('reads and updates settings', async () => {
+    const source = fakeSource();
+    const app = createDashboardServer(source);
+    const get = await app.inject({ method: 'GET', url: '/api/v1/settings' });
+    expect(get.statusCode).toBe(200);
+    expect(get.json().agent.backend).toBe('claude-sdk');
+
+    const patch = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/settings',
+      payload: { agent: { max_concurrent_agents: 8 }, polling: { interval_ms: 10_000 } },
+    });
+    expect(patch.statusCode).toBe(200);
+    expect(source.updateSettings).toHaveBeenCalledWith({
+      agent: { max_concurrent_agents: 8 },
+      polling: { interval_ms: 10_000 },
+    });
+
+    const empty = await app.inject({ method: 'PATCH', url: '/api/v1/settings', payload: {} });
+    expect(empty.statusCode).toBe(400);
     await app.close();
   });
 

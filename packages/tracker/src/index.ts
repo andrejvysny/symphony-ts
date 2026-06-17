@@ -22,6 +22,11 @@ export { MemoryTracker, type MemoryTrackerOptions } from './memory/memory-tracke
 export { PlaneTracker, type PlaneTrackerOptions } from './plane/adapter.js';
 export { PlaneClient, type PlaneClientOptions, type RestMethod } from './plane/client.js';
 export {
+  PlaneWorkspaceClient,
+  type PlaneWorkspaceClientOptions,
+  type WorkspaceProject,
+} from './plane/workspace-client.js';
+export {
   normalizeIssue as normalizePlaneIssue,
   planePriorityToInt,
   intToPlanePriority,

@@ -15,6 +15,8 @@ export interface Workspace {
 
 /** The subset of workspace operations the orchestrator/worker depend on (injectable in tests). */
 export interface IWorkspaceManager {
+  /** Prepare the shared clone; must run before createForIssue (also called on project switch). */
+  init(): Promise<void>;
   createForIssue(issue: NormalizedIssue): Promise<Workspace>;
   runBeforeRun(issue: NormalizedIssue, ws: Workspace): Promise<HookOutcome>;
   runAfterRun(issue: NormalizedIssue, ws: Workspace): Promise<HookOutcome>;

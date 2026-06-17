@@ -3,7 +3,13 @@ import { fileURLToPath } from 'node:url';
 import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import Fastify, { type FastifyInstance } from 'fastify';
-import type { CreateTicketInput, DashboardSource, IssueEditInput } from '@symphony/core';
+import type {
+  CreateProjectInput,
+  CreateTicketInput,
+  DashboardSource,
+  IssueEditInput,
+  SettingsPatch,
+} from '@symphony/core';
 import { DASHBOARD_HTML } from './html.js';
 
 export type { DashboardSource } from '@symphony/core';
@@ -45,6 +51,33 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
   app.get('/api/v1/meta', async () => source.runtimeInfo());
   app.route({ method: [...OTHER_METHODS], url: '/api/v1/meta', handler: methodNotAllowed });
 
+  app.get('/api/v1/capabilities', async () => source.capabilities());
+  app.route({
+    method: [...OTHER_METHODS],
+    url: '/api/v1/capabilities',
+    handler: methodNotAllowed,
+  });
+
+  app.get('/api/v1/projects', async (_req, reply) => {
+    try {
+      return await source.listProjects();
+    } catch (e) {
+      return reply
+        .code(503)
+        .send({ error: { code: 'projects_unavailable', message: (e as Error).message } });
+    }
+  });
+
+  app.get('/api/v1/settings', async (_req, reply) => {
+    try {
+      return source.getSettings();
+    } catch (e) {
+      return reply
+        .code(503)
+        .send({ error: { code: 'settings_unavailable', message: (e as Error).message } });
+    }
+  });
+
   app.get('/api/v1/board', async (_req, reply) => {
     try {
       return await source.getBoard();
@@ -78,6 +111,62 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
   app.get('/api/v1/sessions', async () => ({ sessions: source.listSessions() }));
 
   // ---- writes ----
+  app.post<{ Body: CreateProjectInput }>('/api/v1/projects', async (req, reply) => {
+    const b = req.body ?? ({} as CreateProjectInput);
+    if (!b.name || !b.identifier || !b.repo) {
+      return reply.code(400).send({ error: { code: 'missing_fields' } });
+    }
+    try {
+      const created = await source.createProject({
+        name: b.name,
+        identifier: b.identifier,
+        repo: b.repo,
+      });
+      return reply.code(201).send(created);
+    } catch (e) {
+      return reply
+        .code(502)
+        .send({ error: { code: 'create_project_failed', message: (e as Error).message } });
+    }
+  });
+  app.route({
+    method: ['PUT', 'PATCH', 'DELETE'],
+    url: '/api/v1/projects',
+    handler: methodNotAllowed,
+  });
+
+  app.post<{ Body: { projectId?: string } }>('/api/v1/projects/switch', async (req, reply) => {
+    const projectId = req.body?.projectId;
+    if (!projectId) return reply.code(400).send({ error: { code: 'missing_projectId' } });
+    try {
+      return reply.code(200).send(await source.switchProject(projectId));
+    } catch (e) {
+      return reply
+        .code(502)
+        .send({ error: { code: 'switch_failed', message: (e as Error).message } });
+    }
+  });
+
+  app.patch<{ Body: SettingsPatch }>('/api/v1/settings', async (req, reply) => {
+    const patch = req.body ?? {};
+    if (!patch.agent && !patch.polling && !patch.workspace) {
+      return reply.code(400).send({ error: { code: 'empty_patch' } });
+    }
+    try {
+      await source.updateSettings(patch);
+      return reply.code(200).send({ ok: true });
+    } catch (e) {
+      return reply
+        .code(502)
+        .send({ error: { code: 'settings_update_failed', message: (e as Error).message } });
+    }
+  });
+  app.route({
+    method: ['PUT', 'DELETE'],
+    url: '/api/v1/settings',
+    handler: methodNotAllowed,
+  });
+
   app.post('/api/v1/tickets', async (req, reply) => {
     const fields: Record<string, string> = {};
     const files: NonNullable<CreateTicketInput['files']> = [];

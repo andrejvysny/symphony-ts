@@ -114,6 +114,49 @@ export interface StateSnapshot {
   retrying: SnapshotRetry[];
 }
 
+export interface Capabilities {
+  board: boolean;
+  write: boolean;
+  projects: boolean;
+  settings: boolean;
+}
+
+export interface ProjectDTO {
+  project_id: string;
+  name: string;
+  identifier: string | null;
+  repo: string | null;
+  registered: boolean;
+  active: boolean;
+}
+export interface ProjectsDTO {
+  projects: ProjectDTO[];
+  active_project_id: string | null;
+}
+
+export interface SettingsDTO {
+  agent: {
+    backend: string;
+    model: string | null;
+    permission_mode: string;
+    max_turns: number;
+    max_continuations: number;
+    max_concurrent_agents: number;
+    max_retry_backoff_ms: number;
+    turn_timeout_ms: number;
+    stall_timeout_ms: number;
+    tmux: boolean;
+    max_budget_usd: number | null;
+  };
+  polling: { interval_ms: number };
+  workspace: { branch_prefix: string };
+}
+export interface SettingsPatch {
+  agent?: Partial<SettingsDTO['agent']>;
+  polling?: { interval_ms?: number };
+  workspace?: { branch_prefix?: string };
+}
+
 async function jsonOrThrow<T>(res: Response): Promise<T> {
   if (!res.ok) {
     let detail = res.statusText;
@@ -132,6 +175,27 @@ export const api = {
   board: () => fetch('/api/v1/board').then((r) => jsonOrThrow<BoardData>(r)),
   state: () => fetch('/api/v1/state').then((r) => jsonOrThrow<StateSnapshot>(r)),
   meta: () => fetch('/api/v1/meta').then((r) => jsonOrThrow<RuntimeInfo>(r)),
+  capabilities: () => fetch('/api/v1/capabilities').then((r) => jsonOrThrow<Capabilities>(r)),
+  projects: () => fetch('/api/v1/projects').then((r) => jsonOrThrow<ProjectsDTO>(r)),
+  switchProject: (projectId: string) =>
+    fetch('/api/v1/projects/switch', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ projectId }),
+    }).then((r) => jsonOrThrow<{ switched: boolean }>(r)),
+  createProject: (input: { name: string; identifier: string; repo: string }) =>
+    fetch('/api/v1/projects', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    }).then((r) => jsonOrThrow<ProjectDTO>(r)),
+  settings: () => fetch('/api/v1/settings').then((r) => jsonOrThrow<SettingsDTO>(r)),
+  updateSettings: (patch: SettingsPatch) =>
+    fetch('/api/v1/settings', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(patch),
+    }).then((r) => jsonOrThrow<{ ok: boolean }>(r)),
   states: () => fetch('/api/v1/states').then((r) => jsonOrThrow<BoardStateDTO[]>(r)),
   labels: () => fetch('/api/v1/labels').then((r) => jsonOrThrow<LabelInfo[]>(r)),
   sessions: () =>
