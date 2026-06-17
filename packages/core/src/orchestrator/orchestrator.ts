@@ -290,6 +290,7 @@ export class Orchestrator {
       this.state.claimed.clear();
       this.state.completed.clear();
       this.state.continuations.clear();
+      this.state.resumeSessions.clear();
       this.state.blocked.clear();
       this.stopIntents.clear();
       this.paused.clear();
