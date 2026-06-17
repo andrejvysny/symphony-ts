@@ -17,15 +17,25 @@ const CONTINUATION_DELAY_MS = 1_000;
 const FAILURE_BASE_MS = 10_000;
 const MAX_POWER = 10;
 
-/** Retry delay (SPEC §16): fixed 1s for continuation, capped exponential for failures. */
+/**
+ * Retry delay: fixed 1s for continuation, jittered capped-exponential for failures.
+ *
+ * Failures use **equal jitter** (`base/2 + rand(0, base/2)`): half the capped exponential
+ * delay is fixed, half is random. This decorrelates concurrent failure retries — a single
+ * tracker/network blip that fails many running issues at once no longer reschedules them all
+ * onto the same instant (thundering herd) — while keeping the worst case `< base`. `rng` is
+ * injectable so tests stay deterministic. Continuation re-checks are not jittered.
+ */
 export function retryDelay(
   attempt: number,
   delayType: 'continuation' | 'failure',
   maxBackoffMs: number,
+  rng: () => number = Math.random,
 ): number {
   if (delayType === 'continuation') return CONTINUATION_DELAY_MS;
   const power = Math.min(Math.max(attempt - 1, 0), MAX_POWER);
-  return Math.min(FAILURE_BASE_MS * 2 ** power, maxBackoffMs);
+  const base = Math.min(FAILURE_BASE_MS * 2 ** power, maxBackoffMs);
+  return Math.floor(base / 2 + rng() * (base / 2));
 }
 
 /** A Todo issue is blocked when any blocker is in a non-terminal state (SPEC §8). */

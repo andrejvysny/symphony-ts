@@ -143,6 +143,99 @@ describe('Orchestrator', () => {
     expect(snap.retrying[0]!.attempt).toBe(1);
   });
 
+  it('blocks a non-retryable failure instead of retrying it (R2)', async () => {
+    const backend = new MockBackend([
+      {
+        status: 'error_execution',
+        error: 'spawn claude ENOENT',
+        category: 'agent_not_found',
+        retryable: false,
+      },
+    ]);
+    const { orchestrator } = setup({ issues: [makeIssue({ id: 'nr', state: 'Todo' })], backend });
+
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+
+    const snap = orchestrator.snapshot();
+    expect(snap.counts.running).toBe(0);
+    expect(snap.counts.retrying).toBe(0); // not retried
+    expect(snap.counts.blocked).toBe(1);
+    expect(snap.blocked[0]!.reason).toContain('non-retryable');
+    expect(snap.blocked[0]!.reason).toContain('agent_not_found');
+    expect(backend.calls.length).toBe(1); // ran exactly once
+  });
+
+  it('blocks a retryable failure once the failure-retry cap is exhausted (R2)', async () => {
+    const backend = new MockBackend([
+      { status: 'error_execution', error: 'boom', retryable: true },
+    ]);
+    const { orchestrator } = setup({
+      issues: [makeIssue({ id: 'cap', state: 'Todo' })],
+      backend,
+      config: { agent: { max_turns: 1, stall_timeout_ms: 0, max_failure_retries: 2 } },
+    });
+
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+    expect(orchestrator.snapshot().retrying[0]!.attempt).toBe(1); // fail #1 → retry attempt 1
+
+    // Drive all scheduled retries to completion. Jittered timers can cascade within one window,
+    // so loop generously rather than asserting exact intermediate attempt counts.
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flush(orchestrator);
+    }
+
+    const snap = orchestrator.snapshot();
+    expect(snap.counts.retrying).toBe(0);
+    expect(snap.counts.blocked).toBe(1);
+    expect(snap.blocked[0]!.reason).toContain('failed after 2 retries');
+    // dispatch(0)=fail#1 → retry attempt1=fail#2 → retry attempt2=fail#3 → attempt 3 > cap 2 → blocked
+    expect(backend.calls.length).toBe(3);
+  });
+
+  it('resumes the agent session on a re-dispatch after a resumable failure with side-effects (R4)', async () => {
+    const backend = new MockBackend([
+      { status: 'error_execution', error: 'upstream blip', retryable: true, sideEffect: true },
+      { status: 'success' },
+    ]);
+    const { orchestrator } = setup({ issues: [makeIssue({ id: 'rs', state: 'Todo' })], backend });
+
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+    expect(orchestrator.snapshot().counts.retrying).toBe(1); // fail #1 scheduled retry
+
+    await vi.advanceTimersByTimeAsync(60_000); // retry fires → re-dispatch (then continuations)
+    await flush(orchestrator);
+
+    // calls[1] is the failure-retry re-dispatch (continuations come after); it must resume the session.
+    expect(backend.calls.length).toBeGreaterThanOrEqual(2);
+    expect(backend.calls[1]!.resumeSessionId).toBe('sess-1');
+  });
+
+  it('does NOT resume after a failure with no side-effects (cold restart) (R4)', async () => {
+    const backend = new MockBackend([
+      {
+        status: 'error_execution',
+        error: 'died before doing anything',
+        retryable: true,
+        sideEffect: false,
+      },
+      { status: 'success' },
+    ]);
+    const { orchestrator } = setup({ issues: [makeIssue({ id: 'cold', state: 'Todo' })], backend });
+
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flush(orchestrator);
+
+    // calls[1] is the re-dispatch after the no-side-effect failure → must start cold (no resume).
+    expect(backend.calls.length).toBeGreaterThanOrEqual(2);
+    expect(backend.calls[1]!.resumeSessionId).toBeUndefined();
+  });
+
   it('enforces the global concurrency limit', async () => {
     const backend = new GatedBackend();
     const { orchestrator } = setup({

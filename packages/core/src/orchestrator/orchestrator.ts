@@ -1,5 +1,11 @@
-import type { AgentEvent, CodingAgentBackend, McpConfig } from '@symphony/agent-backends';
-import type { NormalizedIssue } from '@symphony/shared';
+import {
+  AGENT_DEFS,
+  detectAgent,
+  type AgentEvent,
+  type CodingAgentBackend,
+  type McpConfig,
+} from '@symphony/agent-backends';
+import type { ErrorCategory, NormalizedIssue } from '@symphony/shared';
 import type { Tracker } from '@symphony/tracker';
 import type { SymphonyConfig } from '../config/resolve.js';
 import { dispatchPreflight } from '../config/validate.js';
@@ -60,6 +66,8 @@ export class Orchestrator {
   private queue: Promise<unknown> = Promise.resolve();
   private running = false;
   private stopping = false;
+  /** One-time agent-binary detection result (populated at start). */
+  private detection: { found: boolean; binary: string } | undefined;
 
   constructor(deps: OrchestratorDeps) {
     this.tracker = deps.tracker;
@@ -77,7 +85,45 @@ export class Orchestrator {
 
   start(): void {
     this.running = true;
-    void this.enqueue(() => this.startupCleanup()).finally(() => this.scheduleTick(0));
+    void this.enqueue(() => this.startupCleanup())
+      .then(() => this.detectAgentBinary())
+      .finally(() => this.scheduleTick(0));
+  }
+
+  /** Detect the configured agent binary once at startup (PATH + capability probe). */
+  private async detectAgentBinary(): Promise<void> {
+    const { backend, command } = this.config.agent;
+    const binary =
+      backend === 'codex-cli'
+        ? (command ?? 'codex')
+        : backend === 'opencode-cli'
+          ? (command ?? 'opencode')
+          : (command ?? 'claude'); // claude-sdk + claude-cli both drive `claude`
+    // Reuse the matching CLI def's probe spec (claude-sdk shares the claude-cli def's probes).
+    const def = AGENT_DEFS[backend === 'claude-sdk' ? 'claude-cli' : backend];
+    try {
+      const result = await detectAgent({
+        binary,
+        ...(def?.versionArgs ? { versionArgs: def.versionArgs } : {}),
+        ...(def?.helpArgs ? { helpArgs: def.helpArgs } : {}),
+        ...(def?.capabilityFlags ? { capabilityFlags: def.capabilityFlags } : {}),
+      });
+      this.detection = { found: result.found, binary };
+      if (!result.found) {
+        this.logger.warn(
+          { binary },
+          'configured agent binary not found on PATH; dispatch will be skipped until resolved',
+        );
+      } else {
+        this.logger.info(
+          { binary, ...(result.version ? { version: result.version } : {}) },
+          'agent binary detected',
+        );
+      }
+    } catch (e) {
+      // Detection must never crash startup; leave it undefined (preflight stays optimistic).
+      this.logger.warn({ binary, error: String(e) }, 'agent detection failed; continuing');
+    }
   }
 
   /** Remove workspaces for issues already in a terminal state (SPEC §8.6). */
@@ -275,7 +321,7 @@ export class Orchestrator {
       this.refreshConfig();
       await this.reconcile();
 
-      const pre = dispatchPreflight(this.config);
+      const pre = dispatchPreflight(this.config, this.detection);
       if (!pre.ok) {
         this.logger.warn({ errors: pre.errors }, 'dispatch preflight failed; skipping dispatch');
         return;
@@ -347,9 +393,12 @@ export class Orchestrator {
     // attempt 0 == fresh poll dispatch (not a continuation/failure retry): reset the run of
     // consecutive continuations so the cap only counts uninterrupted continuation re-dispatches.
     if (attempt === 0) this.state.continuations.delete(issue.id);
+    // attempt 0 starts cold; re-dispatches (continuation / failure retry) resume the carried session.
+    if (attempt === 0) this.state.resumeSessions.delete(issue.id);
+    const resumeSessionId = attempt > 0 ? this.state.resumeSessions.get(issue.id) : undefined;
 
     const log = this.logger.child({ issue_id: issue.id, issue_identifier: issue.identifier });
-    log.info({ attempt }, 'dispatching issue');
+    log.info({ attempt, ...(resumeSessionId ? { resuming: true } : {}) }, 'dispatching issue');
 
     const ctx = {
       issue,
@@ -366,7 +415,10 @@ export class Orchestrator {
         if (info.pid !== undefined) entry.pid = info.pid;
         if (info.tmuxSession !== undefined) entry.tmuxSession = info.tmuxSession;
       },
+      ...(resumeSessionId !== undefined ? { resumeSessionId } : {}),
     };
+    // Seed the running entry's sessionId too, so the dashboard shows continuity immediately.
+    if (resumeSessionId !== undefined) entry.sessionId = resumeSessionId;
 
     void runWorker(
       {
@@ -415,6 +467,7 @@ export class Orchestrator {
     if (this.stopping) {
       this.stopIntents.delete(issueId);
       this.state.claimed.delete(issueId);
+      this.state.resumeSessions.delete(issueId);
       return;
     }
 
@@ -424,21 +477,30 @@ export class Orchestrator {
       if (intent === 'terminal') {
         this.state.claimed.delete(issueId);
         this.state.continuations.delete(issueId);
+        this.state.resumeSessions.delete(issueId);
         await this.workspaceManager.cleanup(entry.issue).catch(() => undefined);
         log.info({}, 'stopped: terminal state; workspace cleaned');
       } else if (intent === 'nonactive') {
         this.state.claimed.delete(issueId);
         this.state.continuations.delete(issueId);
+        this.state.resumeSessions.delete(issueId);
         log.info({}, 'stopped: non-active state');
       } else if (intent === 'manual') {
         // Operator terminate: release claim, keep the workspace, no retry. The
         // `paused` set (added by terminate) holds it back from re-dispatch.
         this.state.claimed.delete(issueId);
         this.state.continuations.delete(issueId);
+        this.state.resumeSessions.delete(issueId);
         log.info({}, 'stopped: operator terminated; held from re-dispatch');
       } else {
-        this.scheduleRetry(entry.issue, entry.retryAttempt + 1, 'failure', 'stall');
-        log.warn({}, 'stalled; scheduled retry');
+        // Stall = idle timeout: retryable, bounded by the cap. Carry the session so the retry
+        // resumes the agent's work rather than restarting cold (idle is a transient interruption).
+        if (this.sideEffectSeen(entry)) this.rememberResume(entry);
+        this.failOrBlock(entry.issue, entry.retryAttempt + 1, {
+          error: 'stall',
+          category: 'idle_timeout',
+          retryable: true,
+        });
       }
       return;
     }
@@ -446,8 +508,10 @@ export class Orchestrator {
     switch (outcome.kind) {
       case 'aborted':
         this.state.claimed.delete(issueId);
+        this.state.resumeSessions.delete(issueId);
         return;
       case 'blocked':
+        this.state.resumeSessions.delete(issueId);
         this.state.blocked.set(issueId, {
           issue: entry.issue,
           identifier: entry.identifier,
@@ -462,12 +526,14 @@ export class Orchestrator {
             this.state.completed.add(issueId);
             this.state.claimed.delete(issueId);
             this.state.continuations.delete(issueId);
+            this.state.resumeSessions.delete(issueId);
             await this.workspaceManager.cleanup(entry.issue).catch(() => undefined);
             log.info({}, 'turn completed; issue terminal, workspace cleaned');
             return;
           case 'nonactive':
             this.state.claimed.delete(issueId);
             this.state.continuations.delete(issueId);
+            this.state.resumeSessions.delete(issueId);
             log.info({}, 'turn completed; issue left active, released');
             return;
           case 'exhausted': {
@@ -475,6 +541,7 @@ export class Orchestrator {
             const cap = this.config.agent.max_continuations;
             if (cap > 0 && continuations >= cap) {
               this.state.continuations.delete(issueId);
+              this.state.resumeSessions.delete(issueId);
               this.state.blocked.set(issueId, {
                 issue: entry.issue,
                 identifier: entry.identifier,
@@ -489,6 +556,9 @@ export class Orchestrator {
             }
             this.state.continuations.set(issueId, continuations);
             this.state.completed.add(issueId);
+            // The turn succeeded with work done → resume its session on the continuation re-dispatch
+            // so the agent keeps its file/tool memory instead of re-deriving from the prompt.
+            this.rememberResume(entry);
             this.scheduleRetry(entry.issue, 1, 'continuation');
             log.info({ continuations }, 'turn completed; continuation re-check scheduled');
             return;
@@ -496,14 +566,79 @@ export class Orchestrator {
         }
         return;
       }
-      case 'failed':
-        this.scheduleRetry(entry.issue, entry.retryAttempt + 1, 'failure', outcome.error);
-        log.warn(
-          { error: outcome.error, ...(outcome.category ? { category: outcome.category } : {}) },
-          'attempt failed; scheduled retry',
-        );
+      case 'failed': {
+        // Resume-on-failure: carry the session forward only when the failure is transient AND the
+        // run did real work (a tool ran). Otherwise restart cold. failOrBlock clears it if it blocks.
+        const resumable = outcome.retryable !== false && this.sideEffectSeen(entry);
+        if (resumable) this.rememberResume(entry);
+        else this.state.resumeSessions.delete(issueId);
+        this.failOrBlock(entry.issue, entry.retryAttempt + 1, {
+          error: outcome.error,
+          ...(outcome.category !== undefined ? { category: outcome.category } : {}),
+          ...(outcome.retryable !== undefined ? { retryable: outcome.retryable } : {}),
+        });
         return;
+      }
     }
+  }
+
+  /** Persist the entry's agent session id so the next re-dispatch resumes it (no-op if unset). */
+  private rememberResume(entry: RunningEntry): void {
+    if (entry.sessionId) this.state.resumeSessions.set(entry.issue.id, entry.sessionId);
+  }
+
+  /** Whether the run did observable work this attempt (a tool ran) — gates resume-on-failure. */
+  private sideEffectSeen(entry: RunningEntry): boolean {
+    return entry.eventBuffer.some((e) => e.type === 'tool_use' || e.type === 'tool_result');
+  }
+
+  /**
+   * Decide what to do with a failed attempt: schedule a (jittered) retry, or — when the failure
+   * is non-retryable (permanent category) or the failure-retry cap is exhausted — move the issue
+   * to `blocked` for operator attention instead of retrying forever. Mirrors open-design's
+   * `retryable`/`user_action` gate. `retryable === false` ⇒ permanent; `cap === 0` ⇒ unlimited.
+   */
+  private failOrBlock(
+    issue: NormalizedIssue,
+    nextAttempt: number,
+    opts: { error: string; category?: ErrorCategory; retryable?: boolean },
+  ): void {
+    const log = this.logger.child({ issue_id: issue.id, issue_identifier: issue.identifier });
+    const cap = this.config.agent.max_failure_retries;
+    const permanent = opts.retryable === false;
+    const capExceeded = cap > 0 && nextAttempt > cap;
+    if (permanent || capExceeded) {
+      const reason = permanent
+        ? `non-retryable failure${opts.category ? ` (${opts.category})` : ''}: ${opts.error}`
+        : `failed after ${cap} retr${cap === 1 ? 'y' : 'ies'}: ${opts.error}`;
+      const existing = this.state.retryAttempts.get(issue.id);
+      if (existing) clearTimeout(existing.timer);
+      this.state.retryAttempts.delete(issue.id);
+      this.state.continuations.delete(issue.id);
+      this.state.resumeSessions.delete(issue.id);
+      this.state.blocked.set(issue.id, {
+        issue,
+        identifier: issue.identifier,
+        reason,
+        blockedAt: this.now(),
+      });
+      log.warn(
+        { ...(opts.category ? { category: opts.category } : {}), attempt: nextAttempt, cap },
+        permanent
+          ? 'non-retryable failure; blocking for operator input'
+          : 'retry cap reached; blocking for operator input',
+      );
+      return;
+    }
+    this.scheduleRetry(issue, nextAttempt, 'failure', opts.error);
+    log.warn(
+      {
+        error: opts.error,
+        ...(opts.category ? { category: opts.category } : {}),
+        attempt: nextAttempt,
+      },
+      'attempt failed; scheduled retry',
+    );
   }
 
   // ---- retries ----

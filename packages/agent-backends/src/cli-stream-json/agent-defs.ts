@@ -1,4 +1,5 @@
 import type { AgentEvent, RunOptions } from '../backend.js';
+import type { AgentCapabilities } from './detect.js';
 import type { ParseCtx } from './parsers/common.js';
 import { parseClaudeStreamJson } from './parsers/claude-stream-json.js';
 import { parseCodexJsonl } from './parsers/codex-jsonl.js';
@@ -13,9 +14,15 @@ export interface AgentDef {
   kind: string;
   binary: string;
   promptViaStdin: boolean;
-  buildArgs: (opts: RunOptions, promptOmitted: boolean) => string[];
+  buildArgs: (opts: RunOptions, promptOmitted: boolean, caps?: AgentCapabilities) => string[];
   parser: (line: unknown, ctx: ParseCtx) => AgentEvent[];
   env?: (opts: RunOptions) => Record<string, string>;
+  /** Args to read the version (detection, best-effort). */
+  versionArgs?: string[];
+  /** Args to print help (detection probes these for capability flags). */
+  helpArgs?: string[];
+  /** Help-substring → capability key (detection sets each capability true if its substring appears). */
+  capabilityFlags?: Record<string, keyof AgentCapabilities>;
 }
 
 function mcpConfigArg(opts: RunOptions): string[] {
@@ -28,7 +35,14 @@ export const claudeCliDef: AgentDef = {
   kind: 'claude-cli',
   binary: 'claude',
   promptViaStdin: true,
-  buildArgs: (o) => [
+  versionArgs: ['--version'],
+  // `--include-partial-messages`/`--add-dir` live under the `claude -p` subcommand, so probe its help.
+  helpArgs: ['-p', '--help'],
+  capabilityFlags: {
+    '--include-partial-messages': 'partialMessages',
+    '--add-dir': 'addDir',
+  },
+  buildArgs: (o, _promptOmitted, caps) => [
     '-p',
     '--output-format',
     'stream-json',
@@ -39,6 +53,11 @@ export const claudeCliDef: AgentDef = {
     ...(o.maxTurns ? ['--max-turns', String(o.maxTurns)] : []),
     '--permission-mode',
     o.permissionMode ?? 'bypassPermissions',
+    // Hermetic by default: ignore the host's global/project MCP servers (which can stall a turn);
+    // only Symphony's own `--mcp-config` servers load. Disabled with strictMcpConfig === false.
+    ...(o.strictMcpConfig !== false ? ['--strict-mcp-config'] : []),
+    // Live streaming deltas — opt-in and only when the installed build supports the flag.
+    ...(o.streamPartialMessages && caps?.partialMessages ? ['--include-partial-messages'] : []),
     ...(o.allowedTools?.length ? ['--allowedTools', o.allowedTools.join(',')] : []),
     ...(o.disallowedTools?.length ? ['--disallowedTools', o.disallowedTools.join(',')] : []),
     ...(o.resumeSessionId ? ['--resume', o.resumeSessionId] : []),

@@ -46,4 +46,14 @@ describe('dispatchPreflight', () => {
     expect(noRepo.ok).toBe(false);
     expect(noRepo.errors.join(' ')).toMatch(/workspace\.repo/);
   });
+
+  it('fails when the agent binary was not detected (D1)', () => {
+    const cfg = build({ kind: 'memory' });
+    const missing = dispatchPreflight(cfg, { found: false, binary: 'claude' });
+    expect(missing.ok).toBe(false);
+    expect(missing.errors.join(' ')).toMatch(/binary "claude" not found/);
+    // A successful detection (or none) does not block.
+    expect(dispatchPreflight(cfg, { found: true, binary: 'claude' }).ok).toBe(true);
+    expect(dispatchPreflight(cfg).ok).toBe(true);
+  });
 });

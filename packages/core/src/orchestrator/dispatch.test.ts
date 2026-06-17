@@ -18,11 +18,22 @@ describe('retryDelay', () => {
     expect(retryDelay(1, 'continuation', 300_000)).toBe(1_000);
     expect(retryDelay(5, 'continuation', 300_000)).toBe(1_000);
   });
-  it('uses capped exponential backoff for failures', () => {
-    expect(retryDelay(1, 'failure', 300_000)).toBe(10_000);
-    expect(retryDelay(2, 'failure', 300_000)).toBe(20_000);
-    expect(retryDelay(3, 'failure', 300_000)).toBe(40_000);
-    expect(retryDelay(99, 'failure', 300_000)).toBe(300_000); // capped
+  it('uses capped exponential backoff for failures, equal-jittered into [base/2, base)', () => {
+    // rng=0 → exactly base/2 (the floor); rng→1 → just under base.
+    expect(retryDelay(1, 'failure', 300_000, () => 0)).toBe(5_000);
+    expect(retryDelay(2, 'failure', 300_000, () => 0)).toBe(10_000);
+    expect(retryDelay(3, 'failure', 300_000, () => 0)).toBe(20_000);
+    expect(retryDelay(99, 'failure', 300_000, () => 0)).toBe(150_000); // capped base 300k → 150k
+    // Upper end stays strictly below base for every attempt.
+    expect(retryDelay(1, 'failure', 300_000, () => 0.999999)).toBeLessThan(10_000);
+    expect(retryDelay(99, 'failure', 300_000, () => 0.999999)).toBeLessThan(300_000);
+  });
+  it('keeps the default (Math.random) failure delay within [base/2, base)', () => {
+    for (let i = 0; i < 50; i++) {
+      const d = retryDelay(1, 'failure', 300_000);
+      expect(d).toBeGreaterThanOrEqual(5_000);
+      expect(d).toBeLessThan(10_000);
+    }
   });
 });
 

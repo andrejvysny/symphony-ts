@@ -4,6 +4,7 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { nowIso, type AgentEvent, type RunOptions, type RunResult } from '../backend.js';
 import type { AgentDef } from './agent-defs.js';
+import { detectedCapabilities } from './detect.js';
 import { resultFromEvents, type ParseCtx } from './parsers/common.js';
 import { defaultTmuxController, type TmuxController } from './tmux.js';
 
@@ -20,12 +21,20 @@ function stdinPayload(def: AgentDef, opts: RunOptions): string {
   return opts.prompt;
 }
 
-/** Parse one raw stdout line into normalized events, recording them in `collected`. */
+/** Cap on retained non-JSON stdout lines (diagnostics) so a runaway non-JSON stream can't grow unbounded. */
+const RAW_DROPPED_CAP = 50;
+
+/**
+ * Parse one raw stdout line into normalized events, recording them in `collected`. A line that is not
+ * valid JSON is NOT silently discarded: it is captured into `rawDropped` (bounded) so the engine can
+ * fold it into the failure text/classification instead of losing a diagnostic or a truncated result.
+ */
 function* emitForLine(
   def: AgentDef,
   ctx: ParseCtx,
   rawLine: string,
   collected: AgentEvent[],
+  rawDropped: string[],
 ): Generator<AgentEvent> {
   const trimmed = rawLine.trim();
   if (!trimmed) return;
@@ -33,7 +42,8 @@ function* emitForLine(
   try {
     json = JSON.parse(trimmed);
   } catch {
-    return; // non-JSON diagnostic line
+    if (rawDropped.length < RAW_DROPPED_CAP) rawDropped.push(trimmed);
+    return;
   }
   for (const ev of def.parser(json, ctx)) {
     collected.push(ev);
@@ -54,7 +64,7 @@ export async function* runAgentDef(
 ): AsyncGenerator<AgentEvent, RunResult, void> {
   if (opts.tmux) return yield* runViaTmux(def, opts, tmux);
 
-  const args = def.buildArgs(opts, def.promptViaStdin);
+  const args = def.buildArgs(opts, def.promptViaStdin, detectedCapabilities(def.binary));
   const child = spawn(def.binary, args, {
     cwd: opts.cwd,
     env: { ...process.env, ...(def.env?.(opts) ?? {}) },
@@ -75,6 +85,24 @@ export async function* runAgentDef(
         }, opts.timeoutMs)
       : undefined;
 
+  // Soft idle watchdog: reset on every stdout line; SIGTERM (then SIGKILL after a grace) when the
+  // stream goes silent for `idleTimeoutMs`. Catches hung tools / upstream stalls long before the
+  // hard `timeoutMs`. 0 disables.
+  let idledOut = false;
+  const idleMs = opts.idleTimeoutMs ?? 0;
+  let idleTimer: NodeJS.Timeout | undefined;
+  let idleKillTimer: NodeJS.Timeout | undefined;
+  const resetIdle = (): void => {
+    if (idleMs <= 0) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      idledOut = true;
+      child.kill('SIGTERM');
+      idleKillTimer = setTimeout(() => child.kill('SIGKILL'), IDLE_GRACE_MS);
+    }, idleMs);
+  };
+  resetIdle();
+
   const stderrChunks: string[] = [];
   child.stderr?.on('data', (d: Buffer) => {
     if (stderrChunks.length < 50) stderrChunks.push(d.toString());
@@ -87,31 +115,75 @@ export async function* runAgentDef(
 
   const ctx: ParseCtx = {};
   const collected: AgentEvent[] = [];
+  const rawDropped: string[] = [];
 
-  const exitPromise = new Promise<number>((resolve) => {
-    child.on('close', (code) => resolve(code ?? 0));
-    child.on('error', () => resolve(127));
-  });
+  const exitPromise = new Promise<{ code: number; exitSignal: NodeJS.Signals | null }>(
+    (resolve) => {
+      child.on('close', (code, exitSignal) =>
+        resolve({ code: code ?? 0, exitSignal: exitSignal ?? null }),
+      );
+      child.on('error', () => resolve({ code: 127, exitSignal: null }));
+    },
+  );
 
   const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity });
   for await (const line of rl) {
-    yield* emitForLine(def, ctx, line, collected);
+    resetIdle();
+    yield* emitForLine(def, ctx, line, collected, rawDropped);
   }
 
-  const exitCode = await exitPromise;
+  const { code: exitCode, exitSignal } = await exitPromise;
   if (timer) clearTimeout(timer);
+  if (idleTimer) clearTimeout(idleTimer);
+  if (idleKillTimer) clearTimeout(idleKillTimer);
 
-  let result = resultFromEvents(collected, exitCode, ctx.sessionId);
+  let result = resultFromEvents(collected, exitCode, ctx.sessionId, {
+    signal: exitSignal,
+    stderr: joinDiagnostics(stderrChunks.join(''), rawDropped),
+  });
   if (timedOut) {
     result = {
       ...result,
       status: 'error_execution',
       error: 'turn timed out',
       errorCategory: 'turn_timeout',
+      retryable: true,
     };
+  } else if (idledOut) {
+    result = {
+      ...result,
+      status: 'error_execution',
+      error: `no agent activity for ${idleMs}ms (idle watchdog)`,
+      errorCategory: 'idle_timeout',
+      retryable: true,
+    };
+  } else {
+    result = applyBudget(result, opts.maxBudgetUsd);
   }
   yield { type: 'result', result, at: nowIso() };
   return result;
+}
+
+/**
+ * CLI budget parity with the SDK's `maxBudgetUsd`: if the turn's reported cost exceeds the cap, mark
+ * it `error_budget` (non-retryable — operator must raise the cap). claude stream-json reports cost
+ * only in the final `result` line, so enforcement is end-of-turn for the non-tmux path.
+ */
+function applyBudget(result: RunResult, maxBudgetUsd: number | undefined): RunResult {
+  if (maxBudgetUsd === undefined || (result.costUsd ?? 0) <= maxBudgetUsd) return result;
+  return {
+    ...result,
+    status: 'error_budget',
+    error: `cost budget exceeded ($${result.costUsd} > $${maxBudgetUsd})`,
+    retryable: false,
+  };
+}
+
+/** Fold captured non-JSON stdout lines into the stderr diagnostics so they aren't silently lost. */
+function joinDiagnostics(stderr: string, rawDropped: string[]): string {
+  if (rawDropped.length === 0) return stderr;
+  const note = `[${rawDropped.length} non-JSON stdout line(s)]\n${rawDropped.join('\n')}`;
+  return stderr ? `${stderr}\n${note}` : note;
 }
 
 /** POSIX single-quote a string for embedding in a `bash -lc` command. */
@@ -121,6 +193,8 @@ function shQuote(s: string): string {
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 const POLL_MS = 250;
+/** Grace between the idle watchdog's SIGTERM and the follow-up SIGKILL. */
+const IDLE_GRACE_MS = 5_000;
 
 /**
  * Run a CLI agent inside a detached tmux session. The agent's stdout is `tee`d to
@@ -141,7 +215,7 @@ async function* runViaTmux(
   await writeFile(runLog, '');
   await rm(exitFile, { force: true });
 
-  const args = def.buildArgs(opts, def.promptViaStdin);
+  const args = def.buildArgs(opts, def.promptViaStdin, detectedCapabilities(def.binary));
   let inner = [def.binary, ...args].map(shQuote).join(' ');
   if (def.promptViaStdin) {
     const promptFile = path.join(logDir, 'prompt.txt');
@@ -175,8 +249,23 @@ async function* runViaTmux(
 
   const ctx: ParseCtx = {};
   const collected: AgentEvent[] = [];
+  const rawDropped: string[] = [];
   let offset = 0;
   let buffer = '';
+
+  // Idle watchdog (wall-clock; the tmux session runs in real time): kill the session if no new
+  // event is drained for `idleTimeoutMs`. 0 disables.
+  let idledOut = false;
+  let budgetKilled = false;
+  const idleMs = opts.idleTimeoutMs ?? 0;
+  let lastActivity = Date.now();
+  const latestCostUsd = (): number => {
+    for (let i = collected.length - 1; i >= 0; i--) {
+      const e = collected[i];
+      if (e?.type === 'usage' && e.costUsd !== undefined) return e.costUsd;
+    }
+    return 0;
+  };
 
   const drain = async function* (): AsyncGenerator<AgentEvent> {
     const fh = await open(runLog, 'r');
@@ -191,7 +280,7 @@ async function* runViaTmux(
         while ((nl = buffer.indexOf('\n')) >= 0) {
           const line = buffer.slice(0, nl);
           buffer = buffer.slice(nl + 1);
-          yield* emitForLine(def, ctx, line, collected);
+          yield* emitForLine(def, ctx, line, collected, rawDropped);
         }
       }
     } finally {
@@ -200,12 +289,24 @@ async function* runViaTmux(
   };
 
   for (;;) {
+    const before = collected.length;
     yield* drain();
+    if (collected.length > before) lastActivity = Date.now();
+    if (opts.maxBudgetUsd !== undefined && latestCostUsd() > opts.maxBudgetUsd) {
+      budgetKilled = true;
+      await tmux.killSession(sessionName);
+      break;
+    }
     if (!(await tmux.hasSession(sessionName))) break;
+    if (idleMs > 0 && Date.now() - lastActivity > idleMs) {
+      idledOut = true;
+      await tmux.killSession(sessionName);
+      break;
+    }
     await delay(POLL_MS);
   }
   yield* drain();
-  if (buffer.trim()) yield* emitForLine(def, ctx, buffer, collected);
+  if (buffer.trim()) yield* emitForLine(def, ctx, buffer, collected, rawDropped);
 
   if (timer) clearTimeout(timer);
   if (opts.signal) opts.signal.removeEventListener('abort', onAbort);
@@ -219,14 +320,41 @@ async function* runViaTmux(
     exitCode = timedOut ? 137 : 0;
   }
 
-  let result = resultFromEvents(collected, exitCode, ctx.sessionId);
+  let errLogText = '';
+  try {
+    errLogText = (await readFile(errLog, 'utf8')).slice(-2000);
+  } catch {
+    /* err.log may be absent if the session never started */
+  }
+
+  let result = resultFromEvents(collected, exitCode, ctx.sessionId, {
+    stderr: joinDiagnostics(errLogText, rawDropped),
+  });
   if (timedOut) {
     result = {
       ...result,
       status: 'error_execution',
       error: 'turn timed out',
       errorCategory: 'turn_timeout',
+      retryable: true,
     };
+  } else if (idledOut) {
+    result = {
+      ...result,
+      status: 'error_execution',
+      error: `no agent activity for ${idleMs}ms (idle watchdog)`,
+      errorCategory: 'idle_timeout',
+      retryable: true,
+    };
+  } else if (budgetKilled) {
+    result = {
+      ...result,
+      status: 'error_budget',
+      error: `cost budget exceeded ($${result.costUsd} > $${opts.maxBudgetUsd})`,
+      retryable: false,
+    };
+  } else {
+    result = applyBudget(result, opts.maxBudgetUsd);
   }
   yield { type: 'result', result, at: nowIso() };
   return result;

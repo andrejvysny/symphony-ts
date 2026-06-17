@@ -56,6 +56,13 @@ export interface OrchestratorState {
   continuations: Map<string, number>;
   blocked: Map<string, BlockedEntry>;
   retryAttempts: Map<string, RetryEntry>;
+  /**
+   * Per-issue Claude session id carried ACROSS worker re-dispatch (resume-on-failure / continuation),
+   * so a re-dispatched worker continues the agent's CLI session instead of restarting cold. Set when
+   * a re-dispatch is warranted; cleared when the issue leaves the active pipeline (terminal / blocked
+   * / nonactive / fresh poll dispatch).
+   */
+  resumeSessions: Map<string, string>;
   totals: Totals;
   rateLimits: unknown | null;
   pollCheckInProgress: boolean;
@@ -70,6 +77,7 @@ export function createState(): OrchestratorState {
     continuations: new Map(),
     blocked: new Map(),
     retryAttempts: new Map(),
+    resumeSessions: new Map(),
     totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, secondsRunning: 0 },
     rateLimits: null,
     pollCheckInProgress: false,

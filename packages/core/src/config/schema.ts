@@ -48,6 +48,8 @@ export const hooksSchema = z
 
 export const agentBackendKinds = ['claude-sdk', 'claude-cli', 'codex-cli', 'opencode-cli'] as const;
 export const permissionModes = ['default', 'acceptEdits', 'bypassPermissions', 'plan'] as const;
+/** Claude settings layers the agent may inherit. `user` = host-global ~/.claude (non-hermetic). */
+export const settingSourceKinds = ['user', 'project', 'local'] as const;
 
 export const agentSchema = z
   .object({
@@ -63,13 +65,34 @@ export const agentSchema = z
     max_concurrent_agents: z.number().int().positive().default(10),
     max_concurrent_agents_by_state: z.record(z.string(), z.number().int().positive()).default({}),
     max_retry_backoff_ms: z.number().int().positive().default(300_000),
+    /** Max consecutive failure retries before an issue is blocked for operator input. 0 = unlimited. */
+    max_failure_retries: z.number().int().nonnegative().default(5),
     turn_timeout_ms: z.number().int().positive().default(3_600_000),
     /** 0 disables stall detection. */
     stall_timeout_ms: z.number().int().nonnegative().default(300_000),
+    /**
+     * Backend idle watchdog: kill a turn that emits no events for this long (hung tool / upstream
+     * stall) — faster + cleaner than the hard `turn_timeout_ms`. The timer resets on EVERY event
+     * (incl. tool activity), so long-but-active runs don't trip it. 0 disables.
+     */
+    idle_timeout_ms: z.number().int().nonnegative().default(300_000),
     /** CLI backends: override the binary/base command. */
     command: z.string().optional(),
     /** CLI backends: supervise the agent under a tmux session (attach + raw log file). */
     tmux: z.boolean().default(false),
+    /**
+     * Which Claude settings layers the agent inherits (SDK `settingSources`). Default drops the
+     * host-global `user` layer so per-issue runs are reproducible; keeps the worktree's own
+     * `project`/`local` `.claude` config. Set `['user','project','local']` to inherit everything.
+     */
+    setting_sources: z.array(z.enum(settingSourceKinds)).default(['project', 'local']),
+    /** CLI backends: pass `--strict-mcp-config` so only Symphony's `--mcp-config` servers load
+     * (ignores the host's global/project MCP servers, which can stall a turn). */
+    strict_mcp_config: z.boolean().default(true),
+    /** Persist a durable per-run `events.jsonl` under `logs_root` for every backend (post-mortem). */
+    persist_run_log: z.boolean().default(true),
+    /** Stream partial-message deltas (live text) where the agent supports it; off = full messages. */
+    stream_partial_messages: z.boolean().default(false),
     /** Optional env var name holding the agent API key (parse-only in v1; host login used). */
     api_key_env: z.string().optional(),
   })

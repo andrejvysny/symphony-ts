@@ -67,3 +67,30 @@ stream-json family (claude/codex/opencode).
 - Continuation re-dispatch is bounded by `agent.max_continuations` (default 50, `0` = unlimited):
   after that many consecutive continuations without reaching a terminal state, the issue is moved to
   `blocked` for operator input instead of looping (prevents runaway token spend).
+
+## Failure-recovery layer (the load-bearing recent additions)
+
+- **Failure classification** lives in `agent-backends/src/failure-classification.ts` (`classify()`):
+  one cascade — structured category > OS signal/exit > error-text — mapping every failure onto an
+  `ErrorCategory` + a derived `retryable` bit. Both backends call it; never re-derive categories ad-hoc.
+- **Retry is category-aware and capped** (`orchestrator.failOrBlock`): a non-retryable failure
+  (`agent_not_found`, `invalid_workspace_cwd`, `auth_required`, `prompt_too_large`, process crash) →
+  `blocked` immediately; a retryable one → jittered backoff (`dispatch.retryDelay`, equal-jitter) up to
+  `agent.max_failure_retries` (default 5; `0` = unlimited), then `blocked`. Never retry a hard budget stop.
+- **Idle watchdog** (`agent.idle_timeout_ms`, default 300s, `0` disables) lives **inside** the backends
+  (`engine.ts` + `claude-sdk-backend.ts`): resets on every event, kills a silent turn → `idle_timeout`
+  (retryable), distinct from the hard `turn_timeout_ms` and the coarse orchestrator `stall_timeout_ms`.
+- **Resume-on-failure** (`state.resumeSessions`): a retryable failure (or a continuation) carries the
+  agent's `sessionId` to the next dispatch **only if a side-effect occurred** (a `tool_use`/`tool_result`
+  was seen) — else cold restart. Cleared on terminal/blocked/nonactive/fresh-poll dispatch (no leak).
+- **Detection** runs once at `Orchestrator.start()` (`agent-backends` `detectAgent`): PATH + version +
+  `--help` capability probe (cached). A missing binary fails `dispatchPreflight` (skip-with-reason, not
+  an opaque exit-127). Capability flags gate optional CLI args (e.g. `--include-partial-messages`).
+- **Hermeticity is configurable** (`agent.setting_sources` default `['project','local']`,
+  `agent.strict_mcp_config` default true): the SDK drops host-global `user` settings by default and the
+  CLI passes `--strict-mcp-config`, so per-issue runs are reproducible and don't inherit MCP servers that
+  can stall a turn. The `tracker_api` tool is always passed explicitly, so this is safe.
+- **Durable audit log** (`agent.persist_run_log`, default true): the worker appends every `AgentEvent`
+  to `logs_root/<identifier>/<turn>/events.jsonl` (secrets redacted) for all backends — tests set it
+  `false` to avoid file I/O. The CLI engine also folds non-JSON stdout lines into failure diagnostics
+  instead of dropping them, and enforces `max_budget_usd` (parity with the SDK).

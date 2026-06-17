@@ -33,12 +33,31 @@ export class PromptBuilder {
     }
   }
 
-  /** Continuation guidance for in-worker turns after the first (SPEC §7.1). */
-  continuation(issue: NormalizedIssue, turn: number, maxTurns: number): string {
-    return [
-      `Continue working on ${issue.identifier} (turn ${turn} of ${maxTurns}).`,
-      'Resume from where you left off. When the work is complete, move the ticket to its next',
-      'workflow state. If you are blocked and need operator input, say so explicitly.',
-    ].join(' ');
+  /**
+   * Continuation guidance for turns after the first (SPEC §7.1). Optionally enriched with the
+   * worktree branch + a `git status --porcelain` summary so the agent re-orients without re-deriving
+   * its cwd/state (cuts wasted continuation turns).
+   */
+  continuation(
+    issue: NormalizedIssue,
+    turn: number,
+    maxTurns: number,
+    ctx: { branch?: string; gitStatus?: string } = {},
+  ): string {
+    const lines = [`Continue working on ${issue.identifier} (turn ${turn} of ${maxTurns}).`];
+    if (ctx.branch) lines.push(`Worktree branch: ${ctx.branch}.`);
+    if (ctx.gitStatus !== undefined) {
+      const status = ctx.gitStatus.trim();
+      lines.push(
+        status
+          ? `Uncommitted changes so far:\n${status}`
+          : 'Working tree is clean (no uncommitted changes yet).',
+      );
+    }
+    lines.push(
+      'Resume from where you left off. When the work is complete, move the ticket to its next ' +
+        'workflow state. If you are blocked and need operator input, say so explicitly.',
+    );
+    return lines.join('\n');
   }
 }

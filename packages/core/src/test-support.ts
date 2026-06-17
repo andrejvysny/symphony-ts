@@ -4,7 +4,7 @@ import type {
   RunOptions,
   RunResult,
 } from '@symphony/agent-backends';
-import type { NormalizedIssue } from '@symphony/shared';
+import type { ErrorCategory, NormalizedIssue } from '@symphony/shared';
 import type { SymphonyConfig } from './config/resolve.js';
 import { parseConfig, resolveConfig } from './config/resolve.js';
 import type { IWorkspaceManager, Workspace } from './workspace/manager.js';
@@ -34,7 +34,11 @@ export function testConfig(overrides: Record<string, unknown> = {}): SymphonyCon
       root: '/tmp/fake-ws',
       ...((overrides['workspace'] as object) ?? {}),
     },
-    agent: { stall_timeout_ms: 0, ...((overrides['agent'] as object) ?? {}) },
+    agent: {
+      stall_timeout_ms: 0,
+      persist_run_log: false,
+      ...((overrides['agent'] as object) ?? {}),
+    },
     polling: { interval_ms: 1000, ...((overrides['polling'] as object) ?? {}) },
   };
   return resolveConfig(parseConfig(raw), '/tmp');
@@ -67,7 +71,14 @@ export class FakeWorkspaceManager implements IWorkspaceManager {
 export type ScriptedTurn =
   | { status: 'success'; tokens?: { input: number; output: number } }
   | { status: 'blocked'; reason?: string }
-  | { status: 'error_execution' | 'error_max_turns' | 'error_budget'; error?: string };
+  | {
+      status: 'error_execution' | 'error_max_turns' | 'error_budget';
+      error?: string;
+      category?: ErrorCategory;
+      retryable?: boolean;
+      /** Emit a tool_use before failing, so the run registers a side-effect (gates resume-on-failure). */
+      sideEffect?: boolean;
+    };
 
 /**
  * Backend that returns scripted outcomes. `script` is consumed per run() call
@@ -120,6 +131,9 @@ export class MockBackend implements CodingAgentBackend {
       };
       yield { type: 'input_required', reason: turn.reason ?? 'blocked', at };
     } else {
+      if (turn.sideEffect) {
+        yield { type: 'tool_use', toolName: 'Edit', toolUseId: 't1', input: {}, at };
+      }
       result = {
         status: turn.status,
         sessionId,
@@ -127,8 +141,15 @@ export class MockBackend implements CodingAgentBackend {
         outputTokens: 0,
         totalTokens: 0,
         error: turn.error ?? turn.status,
+        ...(turn.category !== undefined ? { errorCategory: turn.category } : {}),
+        ...(turn.retryable !== undefined ? { retryable: turn.retryable } : {}),
       };
-      yield { type: 'turn_failed', error: turn.error ?? turn.status, at };
+      yield {
+        type: 'turn_failed',
+        error: turn.error ?? turn.status,
+        ...(turn.category !== undefined ? { category: turn.category } : {}),
+        at,
+      };
     }
     yield { type: 'result', result, at };
     return result;

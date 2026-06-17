@@ -1,6 +1,7 @@
 export type {
   AgentRunStatus,
   PermissionMode,
+  SettingSource,
   McpConfig,
   RunOptions,
   RunResult,
@@ -10,10 +11,24 @@ export type {
 export { nowIso } from './backend.js';
 export { ClaudeCodeSdkBackend } from './claude-sdk/claude-sdk-backend.js';
 export { createBackend, type BackendKind, type BackendFactoryOptions } from './registry.js';
+export {
+  classify,
+  isPermanentCategory,
+  type ClassifyInput,
+  type Classification,
+} from './failure-classification.js';
 
 // CLI stream-json backends
 export { CliStreamJsonBackend, cliBackendFor } from './cli-stream-json/cli-backend.js';
 export { runAgentDef } from './cli-stream-json/engine.js';
+export {
+  detectAgent,
+  detectedCapabilities,
+  clearDetectionCache,
+  type DetectionResult,
+  type DetectOptions,
+  type AgentCapabilities,
+} from './cli-stream-json/detect.js';
 export {
   defaultTmuxController,
   tmuxAvailable,

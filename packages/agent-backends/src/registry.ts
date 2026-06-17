@@ -12,7 +12,7 @@ export interface BackendFactoryOptions {
 /** Construct a coding-agent backend by kind. */
 export function createBackend(
   kind: BackendKind,
-  _opts: BackendFactoryOptions = {},
+  opts: BackendFactoryOptions = {},
 ): CodingAgentBackend {
   switch (kind) {
     case 'claude-sdk':
@@ -20,7 +20,7 @@ export function createBackend(
     case 'claude-cli':
     case 'codex-cli':
     case 'opencode-cli':
-      return cliBackendFor(kind);
+      return cliBackendFor(kind, opts.command);
     default:
       throw new Error(`unknown backend kind: ${String(kind)}`);
   }

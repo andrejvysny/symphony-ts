@@ -42,6 +42,34 @@ describe('parseClaudeStreamJson', () => {
     const r = parseClaudeStreamJson({ type: 'result', subtype: 'error_max_turns', usage: {} }, {});
     expect(r.some((e) => e.type === 'turn_failed')).toBe(true);
   });
+
+  it('emits text from partial stream_event deltas and de-dupes the assistant wrapper (O4)', () => {
+    const ctx: ParseCtx = {};
+    const delta = parseClaudeStreamJson(
+      {
+        type: 'stream_event',
+        event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'hello ' } },
+      },
+      ctx,
+    );
+    expect(delta).toEqual([{ type: 'text_delta', text: 'hello ', at: expect.any(String) }]);
+    expect(ctx.streamedText).toBe(true);
+
+    // The assistant wrapper that follows must NOT re-emit the already-streamed text...
+    const wrap = parseClaudeStreamJson(
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'hello world' }] } },
+      ctx,
+    );
+    expect(wrap.filter((e) => e.type === 'text_delta')).toEqual([]);
+    expect(ctx.streamedText).toBe(false);
+
+    // ...but a wrapper with no preceding deltas still emits its text.
+    const plain = parseClaudeStreamJson(
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'direct' }] } },
+      ctx,
+    );
+    expect(plain.some((e) => e.type === 'text_delta')).toBe(true);
+  });
 });
 
 describe('parseCodexJsonl', () => {

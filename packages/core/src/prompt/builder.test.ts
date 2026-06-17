@@ -32,4 +32,15 @@ describe('PromptBuilder', () => {
     expect(b.continuation(issue, 3, 20)).toContain('MT-1');
     expect(b.continuation(issue, 3, 20)).toContain('turn 3 of 20');
   });
+
+  it('enriches continuation with worktree branch + git status (O3)', () => {
+    const b = new PromptBuilder('x');
+    const out = b.continuation(issue, 2, 5, { branch: 'symphony/MT-1', gitStatus: ' M src/a.ts' });
+    expect(out).toContain('symphony/MT-1');
+    expect(out).toContain('src/a.ts');
+    // An empty git status renders the clean-tree note.
+    expect(b.continuation(issue, 2, 5, { branch: 'symphony/MT-1', gitStatus: '' })).toContain(
+      'clean',
+    );
+  });
 });

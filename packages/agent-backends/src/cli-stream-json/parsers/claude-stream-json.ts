@@ -14,10 +14,25 @@ export function parseClaudeStreamJson(json: unknown, ctx: ParseCtx): AgentEvent[
       }
       break;
     }
+    case 'stream_event': {
+      // Only present with --include-partial-messages (O4). Emit live text deltas; the assistant
+      // wrapper that follows will be skipped for text so we don't double-emit (ctx.streamedText).
+      const ev = msg['event'] as Record<string, unknown> | undefined;
+      if (ev?.['type'] === 'content_block_delta') {
+        const delta = ev['delta'] as Record<string, unknown> | undefined;
+        if (delta?.['type'] === 'text_delta' && typeof delta['text'] === 'string') {
+          ctx.streamedText = true;
+          out.push({ type: 'text_delta', text: delta['text'], at: at() });
+        }
+      }
+      break;
+    }
     case 'assistant': {
       for (const b of contentBlocks(msg['message'])) {
-        if (b.type === 'text' && b.text) out.push({ type: 'text_delta', text: b.text, at: at() });
-        else if (b.type === 'tool_use')
+        if (b.type === 'text' && b.text) {
+          // Skip if partial deltas already streamed this message's text (avoid duplication).
+          if (!ctx.streamedText) out.push({ type: 'text_delta', text: b.text, at: at() });
+        } else if (b.type === 'tool_use')
           out.push({
             type: 'tool_use',
             toolName: b.name ?? 'unknown',
@@ -26,6 +41,8 @@ export function parseClaudeStreamJson(json: unknown, ctx: ParseCtx): AgentEvent[
             at: at(),
           });
       }
+      // Reset for the next assistant message's delta/wrapper pairing.
+      ctx.streamedText = false;
       break;
     }
     case 'user': {

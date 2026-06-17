@@ -14,6 +14,7 @@ import {
   type RunResult,
 } from '../backend.js';
 import type { ErrorCategory } from '@symphony/shared';
+import { classify } from '../failure-classification.js';
 
 /** Tools that mean "the agent needs a human decision" → surface as blocked. */
 const NEEDS_INPUT_TOOLS = new Set(['AskUserQuestion']);
@@ -35,19 +36,6 @@ function mapSubtype(subtype: string): AgentRunStatus {
     default:
       return 'error_execution';
   }
-}
-
-/** Best-effort error category: distinguish a missing/unstartable `claude` from runtime errors. */
-function categorizeSdkError(message: string): ErrorCategory {
-  const m = message.toLowerCase();
-  if (
-    m.includes('enoent') ||
-    m.includes('spawn') ||
-    m.includes('command not found') ||
-    m.includes('not found')
-  )
-    return 'agent_not_found';
-  return 'response_error';
 }
 
 interface ContentBlock {
@@ -99,9 +87,11 @@ export class ClaudeCodeSdkBackend implements CodingAgentBackend {
       permissionMode: opts.permissionMode ?? 'bypassPermissions',
       canUseTool,
       abortController: ac,
-      includePartialMessages: false,
-      // Inherit host login + project settings/skills.
-      settingSources: ['user', 'project', 'local'],
+      // Live deltas only when requested (default off → full-message granularity).
+      includePartialMessages: opts.streamPartialMessages ?? false,
+      // Settings layers to inherit. Default `['project','local']` (worktree's own .claude config),
+      // dropping the host-global `user` layer for reproducibility; configurable via agent.setting_sources.
+      settingSources: opts.settingSources ?? ['project', 'local'],
       stderr: () => {},
     };
     if (opts.model !== undefined) options.model = opts.model;
@@ -132,11 +122,27 @@ export class ClaudeCodeSdkBackend implements CodingAgentBackend {
           }, timeoutMs)
         : undefined;
 
+    // Soft idle watchdog: abort if no SDK message arrives for `idleTimeoutMs`. Reset on every
+    // message (incl. tool activity) so long-but-active runs survive. 0/undefined disables.
+    let idledOut = false;
+    const idleMs = opts.idleTimeoutMs ?? 0;
+    let idleTimer: NodeJS.Timeout | undefined;
+    const resetIdle = (): void => {
+      if (idleMs <= 0) return;
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        idledOut = true;
+        ac.abort();
+      }, idleMs);
+    };
+    resetIdle();
+
     try {
       for await (const msg of query({
         prompt: opts.prompt,
         options,
       }) as AsyncGenerator<SDKMessage>) {
+        resetIdle();
         switch (msg.type) {
           case 'system': {
             if (msg.subtype === 'init') {
@@ -215,10 +221,13 @@ export class ClaudeCodeSdkBackend implements CodingAgentBackend {
               yield { type: 'turn_completed', at: nowIso() };
             } else {
               const error = msg.errors?.join('; ') || msg.subtype;
-              const category = categorizeSdkError(error);
+              const c = classify({ text: error });
+              // A budget stop is a hard cap (operator must raise max_budget_usd) → never retry.
+              const retryable = status === 'error_budget' ? false : c.retryable;
               result.error = error;
-              result.errorCategory = category;
-              yield { type: 'turn_failed', error, category, at: nowIso() };
+              result.errorCategory = c.category;
+              result.retryable = retryable;
+              yield { type: 'turn_failed', error, category: c.category, at: nowIso() };
             }
             break;
           }
@@ -229,22 +238,30 @@ export class ClaudeCodeSdkBackend implements CodingAgentBackend {
     } catch (e) {
       const error = timedOut
         ? `claude-sdk turn exceeded timeout of ${timeoutMs}ms`
-        : e instanceof Error
-          ? e.message
-          : String(e);
-      const category: ErrorCategory = timedOut ? 'turn_timeout' : categorizeSdkError(error);
+        : idledOut
+          ? `no agent activity for ${idleMs}ms (idle watchdog)`
+          : e instanceof Error
+            ? e.message
+            : String(e);
+      const c = timedOut
+        ? { category: 'turn_timeout' as ErrorCategory, retryable: true }
+        : idledOut
+          ? { category: 'idle_timeout' as ErrorCategory, retryable: true }
+          : classify({ text: error });
       result = {
         status: 'error_execution',
         inputTokens: 0,
         outputTokens: 0,
         totalTokens: 0,
         error,
-        errorCategory: category,
+        errorCategory: c.category,
+        retryable: c.retryable,
         ...(sessionId !== undefined ? { sessionId } : {}),
       };
-      yield { type: 'turn_failed', error, category, at: nowIso() };
+      yield { type: 'turn_failed', error, category: c.category, at: nowIso() };
     } finally {
       if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (idleTimer) clearTimeout(idleTimer);
     }
 
     const final: RunResult = result ?? {
@@ -253,7 +270,8 @@ export class ClaudeCodeSdkBackend implements CodingAgentBackend {
       outputTokens: 0,
       totalTokens: 0,
       error: 'agent produced no result message',
-      errorCategory: 'process_exit',
+      errorCategory: 'response_error',
+      retryable: true,
     };
     yield { type: 'result', result: final, at: nowIso() };
     return final;

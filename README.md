@@ -88,6 +88,30 @@ tmux ls                            # symphony-ENG-12
 tmux attach -t symphony-ENG-12     # watch it work
 ```
 
+### Failure recovery & reliability
+
+Symphony drives the local Claude Code defensively (all knobs live under `agent.*` in `WORKFLOW.md`):
+
+- **Category-aware retry** — failures are classified (auth, rate-limit, upstream, prompt-too-large,
+  timeout, idle, process-crash, …) with a derived `retryable` bit. Permanent failures go straight to
+  **blocked** for operator input; transient ones retry on a **jittered** backoff up to
+  `max_failure_retries` (default 5; `0` = unlimited), then block — no more infinite retry loops.
+- **Idle watchdog** — `idle_timeout_ms` (default 5m, `0` disables) kills a turn whose stream goes silent
+  (hung tool / upstream stall), far faster than the 1h hard `turn_timeout_ms`. It resets on every event,
+  so long-but-active tool runs survive.
+- **Resume-on-failure** — a transient failure (or a continuation) resumes the agent's CLI session on the
+  next attempt **when work was already done** (a tool ran), instead of restarting cold.
+- **Fail-fast detection** — the configured agent binary is PATH-probed once at startup (with a `--help`
+  capability probe); a missing binary skips dispatch with a clear reason. `agent.command` overrides the
+  binary (e.g. a wrapper or non-PATH `claude`).
+- **Hermetic by default, configurable** — `setting_sources` (default `['project','local']`) and
+  `strict_mcp_config` (default true) keep per-issue runs reproducible and prevent inherited host MCP
+  servers from stalling a turn. Add `user` to `setting_sources` to inherit your host-global `~/.claude`.
+- **Durable audit log** — `persist_run_log` (default true) writes every run's events to
+  `<logs_root>/<issue-id>/<turn>/events.jsonl` (secrets redacted) for **all** backends, not just tmux.
+- **Live streaming** — opt in with `stream_partial_messages: true` (CLI flag auto-gated on the build's
+  capability) for token-level dashboard updates.
+
 ## Conventions
 
 - TS strict (`exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`), ESM (`NodeNext`).

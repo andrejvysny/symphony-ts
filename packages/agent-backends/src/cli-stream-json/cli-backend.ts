@@ -14,8 +14,14 @@ export class CliStreamJsonBackend implements CodingAgentBackend {
   }
 }
 
-export function cliBackendFor(kind: string): CliStreamJsonBackend {
+/**
+ * Build a CLI backend for `kind`. An optional `command` overrides the def's default
+ * `binary` (config `agent.command`) — e.g. a wrapper script or a non-PATH `claude`.
+ * The def is shallow-cloned so the shared registry entry stays unmutated.
+ */
+export function cliBackendFor(kind: string, command?: string): CliStreamJsonBackend {
   const def = AGENT_DEFS[kind];
   if (!def) throw new Error(`no CLI agent def for kind "${kind}"`);
-  return new CliStreamJsonBackend(def);
+  const resolved = command ? { ...def, binary: command } : def;
+  return new CliStreamJsonBackend(resolved);
 }

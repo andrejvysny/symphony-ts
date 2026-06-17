@@ -1,4 +1,7 @@
+import { execFile } from 'node:child_process';
+import { appendFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import type {
   AgentEvent,
   CodingAgentBackend,
@@ -13,6 +16,29 @@ import { PromptBuilder } from '../prompt/builder.js';
 import { assertCwdIsWorkspace } from '../workspace/path-safety.js';
 import type { IWorkspaceManager } from '../workspace/manager.js';
 
+const execFileAsync = promisify(execFile);
+
+/** Mask obvious secrets (api keys/tokens) in a serialized audit line, plus a known literal secret. */
+const SECRET_RE = /(api[_-]?key|token|secret|password)(["']?\s*[:=]\s*["']?)([^"'\s,}]+)/gi;
+function redactSecrets(line: string, literal?: string): string {
+  let out = line.replace(SECRET_RE, (_m, key: string, sep: string) => `${key}${sep}***`);
+  if (literal && literal.length >= 6) out = out.split(literal).join('***');
+  return out;
+}
+
+/** Best-effort `git status --porcelain` summary for the continuation prompt (capped, never throws). */
+async function gitStatusSummary(cwd: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFileAsync('git', ['status', '--porcelain'], {
+      cwd,
+      timeout: 5_000,
+    });
+    return stdout.split('\n').slice(0, 30).join('\n').trimEnd();
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Why a worker's turn loop ended cleanly:
  * - `terminal`   — the issue reached a terminal state (clean up, do not continue)
@@ -24,7 +50,7 @@ export type CompletedDisposition = 'terminal' | 'nonactive' | 'exhausted';
 export type WorkerOutcome =
   | { kind: 'completed'; disposition: CompletedDisposition }
   | { kind: 'blocked'; reason: string }
-  | { kind: 'failed'; error: string; category?: ErrorCategory }
+  | { kind: 'failed'; error: string; category?: ErrorCategory; retryable?: boolean }
   | { kind: 'aborted' };
 
 export interface WorkerDeps {
@@ -44,6 +70,8 @@ export interface WorkerContext {
   onSession: (sessionId: string) => void;
   onWorktree: (path: string) => void;
   onProcess: (info: { pid?: number; tmuxSession?: string }) => void;
+  /** Seed an existing agent session to resume on turn 1 (resume-on-failure / continuation). */
+  resumeSessionId?: string;
 }
 
 /**
@@ -68,16 +96,28 @@ export async function runWorker(deps: WorkerDeps, ctx: WorkerContext): Promise<W
   const before = await workspaceManager.runBeforeRun(issue, ws);
   if (!before.ok) return { kind: 'failed', error: `before_run hook failed: ${before.error ?? ''}` };
 
-  let sessionId: string | undefined;
+  // Seed from a carried-over session so turn 1 resumes the agent's prior CLI session.
+  let sessionId: string | undefined = ctx.resumeSessionId;
   try {
     for (let turn = 1; turn <= maxTurns; turn++) {
       if (ctx.signal.aborted) return { kind: 'aborted' };
       assertCwdIsWorkspace(ws.path, ws.path);
 
-      const prompt =
-        turn === 1
-          ? promptBuilder.build(issue, ctx.attempt)
-          : promptBuilder.continuation(issue, turn, maxTurns);
+      let prompt: string;
+      if (turn === 1) {
+        prompt = promptBuilder.build(issue, ctx.attempt);
+      } else {
+        const contCtx: { branch?: string; gitStatus?: string } = {};
+        if (ws.branch) contCtx.branch = ws.branch;
+        const gs = await gitStatusSummary(ws.path);
+        if (gs !== undefined) contCtx.gitStatus = gs;
+        prompt = promptBuilder.continuation(issue, turn, maxTurns, contCtx);
+      }
+
+      const persistLog = config.agent.persist_run_log !== false;
+      const auditPath = path.join(config.logs_root, issue.identifier, String(turn), 'events.jsonl');
+      if (persistLog)
+        await mkdir(path.dirname(auditPath), { recursive: true }).catch(() => undefined);
 
       const runOpts: RunOptions = {
         prompt,
@@ -85,6 +125,10 @@ export async function runWorker(deps: WorkerDeps, ctx: WorkerContext): Promise<W
         permissionMode: config.agent.permission_mode,
         signal: ctx.signal,
         timeoutMs: config.agent.turn_timeout_ms,
+        idleTimeoutMs: config.agent.idle_timeout_ms,
+        settingSources: config.agent.setting_sources,
+        strictMcpConfig: config.agent.strict_mcp_config,
+        streamPartialMessages: config.agent.stream_partial_messages,
         issueRef: { id: issue.id, identifier: issue.identifier, title: issue.title },
       };
       if (config.agent.model !== undefined) runOpts.model = config.agent.model;
@@ -108,6 +152,12 @@ export async function runWorker(deps: WorkerDeps, ctx: WorkerContext): Promise<W
       let turnResult: RunResult | undefined;
       for await (const ev of backend.run(runOpts)) {
         ctx.emit(ev);
+        if (persistLog) {
+          await appendFile(
+            auditPath,
+            `${redactSecrets(JSON.stringify(ev), config.tracker.api_key)}\n`,
+          ).catch(() => undefined);
+        }
         if (ev.type === 'session_started') {
           sessionId = ev.sessionId;
           ctx.onSession(ev.sessionId);
@@ -137,6 +187,9 @@ export async function runWorker(deps: WorkerDeps, ctx: WorkerContext): Promise<W
             ...(turnResult.errorCategory !== undefined
               ? { category: turnResult.errorCategory }
               : {}),
+            // A budget stop is a hard cap → never retry, regardless of the classifier.
+            retryable:
+              turnResult.status === 'error_budget' ? false : (turnResult.retryable ?? true),
           };
         case 'success': {
           let refs;
