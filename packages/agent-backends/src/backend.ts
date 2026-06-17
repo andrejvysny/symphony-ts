@@ -12,8 +12,13 @@ export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | '
 
 /** MCP wiring passed to a backend. SDK servers run in-process; stdio servers are spawned. */
 export interface McpConfig {
-  /** Opaque SDK MCP server objects (Claude SDK backend only). */
-  sdkServers?: Record<string, unknown>;
+  /**
+   * Factory for opaque SDK MCP server objects (Claude SDK backend only). Called once
+   * per `run()` so each (possibly concurrent) agent gets a FRESH server instance: an
+   * SDK MCP `Server` may only be connected to one transport at a time, so sharing one
+   * instance across concurrent runs makes the 2nd+ run silently lose its tools.
+   */
+  sdkServers?: () => Record<string, unknown>;
   /** Stdio MCP server launch specs (CLI backends via --mcp-config). */
   stdioServers?: Record<string, { command: string; args: string[]; env?: Record<string, string> }>;
 }

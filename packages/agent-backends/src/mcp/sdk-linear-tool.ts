@@ -10,7 +10,8 @@ export type LinearGraphqlExecutor = (input: unknown) => Promise<LinearToolResult
 
 /**
  * Build an in-process SDK MCP server exposing `linear_graphql` to the Claude SDK
- * backend. Returns the `mcpServers` map to drop into RunOptions.mcpConfig.sdkServers.
+ * backend. Returns a fresh `mcpServers` map; call it once PER RUN (via the
+ * `McpConfig.sdkServers` factory) so concurrent agents never share one server instance.
  */
 export function buildLinearSdkMcpServer(executor: LinearGraphqlExecutor): Record<string, unknown> {
   const server = createSdkMcpServer({

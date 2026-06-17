@@ -59,12 +59,21 @@ Title: {{ issue.title }}
 Your job:
 1. Implement the change end-to-end. Keep edits scoped to this issue.
 2. Run the project's build/tests/lints and make them pass before finishing.
-3. Commit your work with a concise message, push the `symphony/{{ issue.identifier }}` branch,
-   and open a pull request.
-4. Move the Linear issue to its next workflow state using the `linear_graphql` tool
-   (e.g. transition to "Human Review" or "Merging" per your team's process), and post a short
-   comment summarizing what you did and linking the PR.
+3. Commit your work to the current `symphony/{{ issue.identifier }}` branch with a concise message.
+   Do NOT push or open a pull request — commits stay local for now.
+4. Move the Linear issue to "Human Review" so a human can take it from here, and post a short
+   comment summarizing what you changed. Use the `mcp__symphony__linear_graphql` tool (see below).
 5. If you are blocked and genuinely need a human decision, say so explicitly and stop — do not guess.
 
-You have a `linear_graphql` tool that runs raw Linear GraphQL queries/mutations with Symphony's
-configured auth (use it for state transitions, comments, and PR metadata).
+You have a `mcp__symphony__linear_graphql` tool that runs ONE raw Linear GraphQL query/mutation
+with Symphony's configured auth. Linear's `issueUpdate` needs the target state's **ID (a UUID), not
+its name**, so always resolve the id first:
+
+a. Look up this issue's team workflow states and find the one named "Human Review":
+   `query { issue(id: "{{ issue.id }}") { team { states { nodes { id name } } } } }`
+b. Move the issue using that id:
+   `mutation { issueUpdate(id: "{{ issue.id }}", input: { stateId: "<STATE_UUID>" }) { success } }`
+c. Post your summary:
+   `mutation { commentCreate(input: { issueId: "{{ issue.id }}", body: "..." }) { success } }`
+
+Pass each operation as a single GraphQL document; call the tool once per operation.

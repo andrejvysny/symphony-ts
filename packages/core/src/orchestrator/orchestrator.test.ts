@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CodingAgentBackend } from '@symphony/agent-backends';
 import { MemoryTracker } from '@symphony/tracker';
 import { PromptBuilder } from '../prompt/builder.js';
 import {
@@ -27,7 +28,7 @@ afterEach(() => {
 
 function setup(opts: {
   issues: ReturnType<typeof makeIssue>[];
-  backend: MockBackend | GatedBackend;
+  backend: CodingAgentBackend;
   config?: Record<string, unknown>;
 }) {
   const config = testConfig({
@@ -104,6 +105,30 @@ describe('Orchestrator', () => {
     expect(wm.cleaned).toContain('2');
   });
 
+  it('unblock() clears a blocked-but-active issue so it is re-dispatched', async () => {
+    const backend = new MockBackend([
+      { status: 'blocked', reason: 'need input' },
+      { status: 'success' },
+    ]);
+    const { orchestrator } = setup({ issues: [makeIssue({ id: 'b1', state: 'Todo' })], backend });
+
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+    expect(orchestrator.snapshot().counts.blocked).toBe(1);
+
+    // Operator clears the block while the ticket is still active (no tracker bounce).
+    expect(await orchestrator.unblock('b1')).toEqual({ unblocked: true });
+    expect(orchestrator.snapshot().counts.blocked).toBe(0);
+
+    // Next poll re-dispatches it (2nd scripted turn succeeds).
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+    expect(backend.calls.length).toBe(2);
+
+    // Unblocking something not blocked is a no-op.
+    expect(await orchestrator.unblock('b1')).toEqual({ unblocked: false });
+  });
+
   it('schedules an exponential-backoff retry on failure', async () => {
     const backend = new MockBackend([{ status: 'error_execution', error: 'boom' }]);
     const { orchestrator } = setup({ issues: [makeIssue({ id: '3', state: 'Todo' })], backend });
@@ -134,6 +159,69 @@ describe('Orchestrator', () => {
     backend.releaseAll();
     await flush(orchestrator);
     expect(orchestrator.snapshot().counts.running).toBe(0);
+  });
+
+  it('runs 3 issues concurrently with per-issue session + token isolation (no cross-wiring)', async () => {
+    const tokenFor = (id: string): number => ({ i1: 100, i2: 200, i3: 300 })[id] ?? 0;
+    const releasers: Array<() => void> = [];
+    const backend: CodingAgentBackend = {
+      kind: 'iso',
+      async *run(opts) {
+        const at = new Date(0).toISOString();
+        const id = opts.issueRef?.id ?? '?';
+        const t = tokenFor(id);
+        yield { type: 'session_started', sessionId: `sess-${id}`, at };
+        yield {
+          type: 'usage',
+          inputTokens: t,
+          outputTokens: 0,
+          totalTokens: t,
+          absolute: true,
+          at,
+        };
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) return resolve();
+          opts.signal?.addEventListener('abort', () => resolve(), { once: true });
+          releasers.push(resolve);
+        });
+        const result = {
+          status: 'success' as const,
+          sessionId: `sess-${id}`,
+          inputTokens: t,
+          outputTokens: 0,
+          totalTokens: t,
+        };
+        yield { type: 'turn_completed', at };
+        yield { type: 'result', result, at };
+        return result;
+      },
+    };
+    const { orchestrator } = setup({
+      issues: [
+        makeIssue({ id: 'i1', state: 'Todo' }),
+        makeIssue({ id: 'i2', state: 'Todo' }),
+        makeIssue({ id: 'i3', state: 'Todo' }),
+      ],
+      backend,
+      config: { agent: { max_turns: 1, stall_timeout_ms: 0, max_concurrent_agents: 3 } },
+    });
+
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+
+    const snap = orchestrator.snapshot();
+    expect(snap.counts.running).toBe(3);
+    const byId = Object.fromEntries(snap.running.map((r) => [r.issue_id, r]));
+    expect(byId['i1']?.tokens.total_tokens).toBe(100);
+    expect(byId['i2']?.tokens.total_tokens).toBe(200);
+    expect(byId['i3']?.tokens.total_tokens).toBe(300);
+    // Distinct sessions per issue — events were not cross-wired.
+    expect(new Set(snap.running.map((r) => r.session_id)).size).toBe(3);
+
+    for (const r of releasers.splice(0)) r();
+    await flush(orchestrator);
+    expect(orchestrator.snapshot().counts.running).toBe(0);
+    expect(orchestrator.snapshot().codex_totals.total_tokens).toBe(600);
   });
 
   it('terminates and cleans up a running issue that goes terminal', async () => {

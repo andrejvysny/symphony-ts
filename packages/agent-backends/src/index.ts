@@ -37,3 +37,8 @@ export {
   type LinearGraphqlExecutor,
   type LinearToolResult,
 } from './mcp/sdk-linear-tool.js';
+export {
+  buildMemorySdkMcpServer,
+  type MemoryToolExecutor,
+  type MemoryToolResult,
+} from './mcp/sdk-memory-tool.js';

@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import {
   buildLinearSdkMcpServer,
   createBackend,
@@ -48,19 +49,37 @@ export function buildWorkspaceManager(config: SymphonyConfig): WorkspaceManager 
 }
 
 /**
- * Build the MCP config exposing `linear_graphql` to the agent. For the in-process
- * Claude SDK backend this returns an SDK MCP server. (Stdio MCP for CLI backends
- * is a Phase 6 follow-up.)
+ * Build the MCP config exposing `linear_graphql` to the agent. The in-process Claude
+ * SDK backend gets an SDK MCP server; CLI backends get a stdio server launch spec
+ * (`node .../stdio-linear-server.js`) loaded via `--mcp-config`. Both paths share the
+ * same transport-neutral executor, so validation/auth are identical.
  */
 export function buildMcpConfig(config: SymphonyConfig): McpConfig | undefined {
   if (config.tracker.kind !== 'linear' || !config.tracker.api_key) return undefined;
-  const client = new LinearClient({
-    endpoint: config.tracker.endpoint,
-    apiKey: config.tracker.api_key,
-  });
-  const executor = makeLinearGraphqlExecutor((q, v) => client.graphql(q, v));
+  const apiKey = config.tracker.api_key;
+  const endpoint = config.tracker.endpoint;
+
   if (config.agent.backend === 'claude-sdk') {
-    return { sdkServers: buildLinearSdkMcpServer(executor) };
+    const client = new LinearClient({ endpoint, apiKey });
+    const executor = makeLinearGraphqlExecutor((q, v) => client.graphql(q, v));
+    // Factory (not a prebuilt instance): the SDK backend rebuilds the server per run so
+    // concurrent agents never share one MCP server instance. The executor is stateless.
+    return { sdkServers: () => buildLinearSdkMcpServer(executor) };
   }
-  return undefined;
+
+  // CLI backends load MCP servers via `--mcp-config`: spawn the standalone stdio server
+  // that exposes the same `linear_graphql` tool. (Consumed by claude-cli today; codex/
+  // opencode flag wiring is a follow-up.)
+  const serverPath = createRequire(import.meta.url).resolve(
+    '@symphony/tracker/stdio-linear-server',
+  );
+  return {
+    stdioServers: {
+      symphony: {
+        command: process.execPath,
+        args: [serverPath],
+        env: { LINEAR_API_KEY: apiKey, SYMPHONY_LINEAR_ENDPOINT: endpoint },
+      },
+    },
+  };
 }

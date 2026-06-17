@@ -161,6 +161,27 @@ export class Orchestrator {
     this.paused.delete(issueId);
   }
 
+  /**
+   * Clear a blocked issue (operator recovery) so the next poll can re-dispatch it. An issue
+   * blocked on operator input (AskUserQuestion) or by the continuation cap otherwise stays
+   * blocked+claimed until its tracker state leaves active (reconcileBlocked). This is the
+   * manual escape hatch that does not require bouncing the ticket through another state.
+   */
+  async unblock(issueId: string): Promise<{ unblocked: boolean }> {
+    return this.enqueue(async () => {
+      const entry = this.state.blocked.get(issueId);
+      if (!entry) return { unblocked: false };
+      this.state.blocked.delete(issueId);
+      this.state.claimed.delete(issueId);
+      this.state.continuations.delete(issueId);
+      this.logger.info(
+        { issue_id: issueId, issue_identifier: entry.identifier },
+        'operator unblock requested; eligible for re-dispatch',
+      );
+      return { unblocked: true };
+    });
+  }
+
   /** Subscribe to a running session's live events; replays the buffer first. Returns unsubscribe. */
   subscribeLogs(issueId: string, cb: (ev: AgentEvent) => void): () => void {
     const entry = this.state.running.get(issueId);

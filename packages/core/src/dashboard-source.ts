@@ -64,6 +64,7 @@ export interface DashboardSource {
   listSessions(): SessionInfo[];
   terminate(issueId: string): Promise<{ terminated: boolean }>;
   terminateAll(): Promise<{ terminated: number }>;
+  unblock(issueId: string): Promise<{ unblocked: boolean }>;
   subscribeLogs(issueId: string, cb: (ev: AgentEvent) => void): () => void;
 }
 
@@ -92,6 +93,7 @@ export function buildDashboardSource(
     listSessions: () => orchestrator.listSessions(),
     terminate: (id) => orchestrator.terminate(id),
     terminateAll: () => orchestrator.terminateAll(),
+    unblock: (id) => orchestrator.unblock(id),
     subscribeLogs: (id, cb) => orchestrator.subscribeLogs(id, cb),
 
     async listStates(): Promise<BoardStateDTO[]> {

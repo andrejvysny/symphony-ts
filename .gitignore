@@ -6,3 +6,6 @@ coverage/
 log/
 .DS_Store
 *.log
+
+# Live config (copy of WORKFLOW.md.example with real project_slug/repo). Not committed.
+/WORKFLOW.md

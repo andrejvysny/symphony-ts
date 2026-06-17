@@ -124,6 +124,9 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
     source.terminate(req.params.issueId),
   );
   app.post('/api/v1/sessions/terminate-all', async () => source.terminateAll());
+  app.post<{ Params: { issueId: string } }>('/api/v1/sessions/:issueId/unblock', async (req) =>
+    source.unblock(req.params.issueId),
+  );
 
   // ---- live logs (SSE) ----
   app.get<{ Params: { issueId: string } }>('/api/v1/sessions/:issueId/logs', (req, reply) => {

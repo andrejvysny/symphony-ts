@@ -19,3 +19,10 @@ export {
   type ToolResult,
   type GraphqlFn,
 } from './tools/linear-graphql.js';
+export { buildStdioLinearServer } from './tools/stdio-linear-server.js';
+export {
+  makeSetIssueStateExecutor,
+  makeAddCommentExecutor,
+  type MemoryToolResult,
+  type MemoryWriter,
+} from './tools/memory-tools.js';

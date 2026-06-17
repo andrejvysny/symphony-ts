@@ -13,6 +13,7 @@ import {
   type RunOptions,
   type RunResult,
 } from '../backend.js';
+import type { ErrorCategory } from '@symphony/shared';
 
 /** Tools that mean "the agent needs a human decision" → surface as blocked. */
 const NEEDS_INPUT_TOOLS = new Set(['AskUserQuestion']);
@@ -34,6 +35,19 @@ function mapSubtype(subtype: string): AgentRunStatus {
     default:
       return 'error_execution';
   }
+}
+
+/** Best-effort error category: distinguish a missing/unstartable `claude` from runtime errors. */
+function categorizeSdkError(message: string): ErrorCategory {
+  const m = message.toLowerCase();
+  if (
+    m.includes('enoent') ||
+    m.includes('spawn') ||
+    m.includes('command not found') ||
+    m.includes('not found')
+  )
+    return 'agent_not_found';
+  return 'response_error';
 }
 
 interface ContentBlock {
@@ -97,11 +111,26 @@ export class ClaudeCodeSdkBackend implements CodingAgentBackend {
     if (opts.disallowedTools !== undefined) options.disallowedTools = opts.disallowedTools;
     if (opts.resumeSessionId !== undefined) options.resume = opts.resumeSessionId;
     if (opts.mcpConfig?.sdkServers !== undefined) {
-      options.mcpServers = opts.mcpConfig.sdkServers as Record<string, McpServerConfig>;
+      // Build a FRESH server instance for this run: an SDK MCP server can only be
+      // connected to one transport at a time, so concurrent runs must not share one.
+      options.mcpServers = opts.mcpConfig.sdkServers() as Record<string, McpServerConfig>;
     }
 
     let sessionId: string | undefined;
     let result: RunResult | undefined;
+
+    // Enforce a per-run wall-clock timeout (the SDK does not honor one itself): abort and
+    // report turn_timeout. External-signal aborts are handled by the worker, which
+    // re-checks signal.aborted and returns `aborted` before inspecting this result.
+    let timedOut = false;
+    const timeoutMs = opts.timeoutMs;
+    const timeoutTimer =
+      timeoutMs !== undefined && timeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            ac.abort();
+          }, timeoutMs)
+        : undefined;
 
     try {
       for await (const msg of query({
@@ -147,6 +176,11 @@ export class ClaudeCodeSdkBackend implements CodingAgentBackend {
             break;
           }
           case 'result': {
+            // `result.usage` is the absolute usage for THIS query() (one run = one turn here).
+            // The orchestrator integrates it as an absolute total and adds the positive delta
+            // (token-accounting.ts). Note: across resumed continuation turns the SDK does not
+            // expose a thread-cumulative total, so multi-turn-within-one-worker token totals may
+            // be approximate; `max_budget_usd` is the authoritative per-run spend bound.
             const usage = msg.usage as
               | { input_tokens?: number; output_tokens?: number }
               | undefined;
@@ -181,8 +215,10 @@ export class ClaudeCodeSdkBackend implements CodingAgentBackend {
               yield { type: 'turn_completed', at: nowIso() };
             } else {
               const error = msg.errors?.join('; ') || msg.subtype;
+              const category = categorizeSdkError(error);
               result.error = error;
-              yield { type: 'turn_failed', error, at: nowIso() };
+              result.errorCategory = category;
+              yield { type: 'turn_failed', error, category, at: nowIso() };
             }
             break;
           }
@@ -191,17 +227,24 @@ export class ClaudeCodeSdkBackend implements CodingAgentBackend {
         }
       }
     } catch (e) {
-      const error = e instanceof Error ? e.message : String(e);
+      const error = timedOut
+        ? `claude-sdk turn exceeded timeout of ${timeoutMs}ms`
+        : e instanceof Error
+          ? e.message
+          : String(e);
+      const category: ErrorCategory = timedOut ? 'turn_timeout' : categorizeSdkError(error);
       result = {
         status: 'error_execution',
         inputTokens: 0,
         outputTokens: 0,
         totalTokens: 0,
         error,
-        errorCategory: 'response_error',
+        errorCategory: category,
         ...(sessionId !== undefined ? { sessionId } : {}),
       };
-      yield { type: 'turn_failed', error, at: nowIso() };
+      yield { type: 'turn_failed', error, category, at: nowIso() };
+    } finally {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
     }
 
     const final: RunResult = result ?? {

@@ -93,6 +93,7 @@ function fakeSource(): DashboardSource {
     ],
     terminate: vi.fn().mockResolvedValue({ terminated: true }),
     terminateAll: vi.fn().mockResolvedValue({ terminated: 2 }),
+    unblock: vi.fn().mockResolvedValue({ unblocked: true }),
     subscribeLogs: vi.fn().mockReturnValue(() => {}),
   };
 }
@@ -162,6 +163,16 @@ describe('dashboard server', () => {
     expect(res.statusCode).toBe(202);
     expect(res.json().operations).toEqual(['poll', 'reconcile']);
     expect(source.requestRefresh).toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('POST /api/v1/sessions/:id/unblock clears a blocked issue', async () => {
+    const source = fakeSource();
+    const app = createDashboardServer(source);
+    const res = await app.inject({ method: 'POST', url: '/api/v1/sessions/mem-1/unblock' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().unblocked).toBe(true);
+    expect(source.unblock).toHaveBeenCalledWith('mem-1');
     await app.close();
   });
 
