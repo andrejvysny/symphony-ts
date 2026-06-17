@@ -39,6 +39,10 @@ export interface OrchestratorDeps {
   mcpConfig?: McpConfig;
   /** Hot-reload hook: returns the latest config + prompt body, or null to keep current. */
   reload?: () => { config: SymphonyConfig; promptBody: string } | null;
+  /** Rebuild deps for a new project on {@link Orchestrator.switchProject} (live re-point). */
+  trackerFactory?: (config: SymphonyConfig) => Tracker;
+  mcpConfigFactory?: (config: SymphonyConfig) => McpConfig | undefined;
+  workspaceManagerFactory?: (config: SymphonyConfig) => IWorkspaceManager;
   /** Injectable clock (tests). */
   now?: () => number;
 }
@@ -47,17 +51,25 @@ type StopIntent = 'terminal' | 'nonactive' | 'stall' | 'manual';
 
 export class Orchestrator {
   private readonly state: OrchestratorState = createState();
-  private readonly tracker: Tracker;
+  // Mutable: swapped atomically by switchProject (live project re-point).
+  private tracker: Tracker;
   private readonly backend: CodingAgentBackend;
-  private readonly workspaceManager: IWorkspaceManager;
+  private workspaceManager: IWorkspaceManager;
   private readonly logger: Logger;
   private readonly reload:
     | (() => { config: SymphonyConfig; promptBody: string } | null)
     | undefined;
+  private readonly trackerFactory: ((config: SymphonyConfig) => Tracker) | undefined;
+  private readonly mcpConfigFactory:
+    | ((config: SymphonyConfig) => McpConfig | undefined)
+    | undefined;
+  private readonly workspaceManagerFactory:
+    | ((config: SymphonyConfig) => IWorkspaceManager)
+    | undefined;
   private readonly now: () => number;
   private promptBuilder: PromptBuilder;
   private config: SymphonyConfig;
-  private readonly mcpConfig: McpConfig | undefined;
+  private mcpConfig: McpConfig | undefined;
   private readonly stopIntents = new Map<string, StopIntent>();
   /** Operator-terminated issues held back from re-dispatch until moved/resumed. */
   private readonly paused = new Set<string>();
@@ -76,9 +88,30 @@ export class Orchestrator {
     this.config = deps.config;
     this.logger = deps.logger ?? noopLogger;
     this.reload = deps.reload;
+    this.trackerFactory = deps.trackerFactory;
+    this.mcpConfigFactory = deps.mcpConfigFactory;
+    this.workspaceManagerFactory = deps.workspaceManagerFactory;
     this.now = deps.now ?? (() => Date.now());
     this.promptBuilder = deps.promptBuilder ?? new PromptBuilder('');
     this.mcpConfig = deps.mcpConfig;
+  }
+
+  /** The live tracker (swapped by switchProject) — the dashboard reads through this. */
+  currentTracker(): Tracker {
+    return this.tracker;
+  }
+
+  /** The live resolved config (reflects switchProject / applyConfig). */
+  currentConfig(): SymphonyConfig {
+    return this.config;
+  }
+
+  /**
+   * Apply a new resolved config immediately WITHOUT rebuilding the tracker (settings changes).
+   * Tracker/repo scope changes must go through {@link switchProject}.
+   */
+  applyConfig(next: SymphonyConfig): void {
+    this.config = next;
   }
 
   // ---- public lifecycle ----
@@ -225,6 +258,56 @@ export class Orchestrator {
         'operator unblock requested; eligible for re-dispatch',
       );
       return { unblocked: true };
+    });
+  }
+
+  /**
+   * Live re-point to a different project: rebuild the tracker / MCP / workspace from `next`, abort
+   * every running agent, reset all run state, and resume polling — no process restart. Atomic: the
+   * new workspace is cloned/initialized BEFORE any teardown, so a bad repo aborts the switch with the
+   * current project untouched. In-flight aborted workers find their entry gone on exit (no-op).
+   */
+  async switchProject(next: SymphonyConfig): Promise<{ switched: boolean }> {
+    if (!this.trackerFactory || !this.workspaceManagerFactory) {
+      throw new Error('switchProject requires tracker + workspace factories');
+    }
+    const trackerFactory = this.trackerFactory;
+    const workspaceManagerFactory = this.workspaceManagerFactory;
+    return this.enqueue(async () => {
+      // 1. Build + init the new project first; throws (e.g. bad repo) before we touch live state.
+      const newTracker = trackerFactory(next);
+      const newWorkspace = workspaceManagerFactory(next);
+      await newWorkspace.init();
+      const newMcp = this.mcpConfigFactory ? this.mcpConfigFactory(next) : undefined;
+
+      // 2. Tear down current run state (timers, running agents, all maps + token totals).
+      if (this.state.tickTimer) clearTimeout(this.state.tickTimer);
+      this.state.tickTimer = null;
+      for (const r of this.state.retryAttempts.values()) clearTimeout(r.timer);
+      this.state.retryAttempts.clear();
+      for (const entry of this.state.running.values()) entry.abort.abort();
+      this.state.running.clear();
+      this.state.claimed.clear();
+      this.state.completed.clear();
+      this.state.continuations.clear();
+      this.state.blocked.clear();
+      this.stopIntents.clear();
+      this.paused.clear();
+      this.state.totals = { inputTokens: 0, outputTokens: 0, totalTokens: 0, secondsRunning: 0 };
+      this.state.rateLimits = null;
+
+      // 3. Swap in the new project and resume.
+      this.tracker = newTracker;
+      this.workspaceManager = newWorkspace;
+      this.mcpConfig = newMcp;
+      this.config = next;
+      await this.startupCleanup();
+      this.logger.info(
+        { project_id: next.tracker.project_id, repo: next.workspace.repo },
+        'switched active project',
+      );
+      if (this.running) this.scheduleTick(0);
+      return { switched: true };
     });
   }
 

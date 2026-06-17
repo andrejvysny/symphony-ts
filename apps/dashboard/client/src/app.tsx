@@ -3,6 +3,8 @@ import {
   api,
   type BoardData,
   type BoardIssueDTO,
+  type Capabilities,
+  type ProjectDTO,
   type RuntimeInfo,
   type SessionInfo,
   type StateSnapshot,
@@ -10,6 +12,8 @@ import {
 import { Board, type Live } from './board.js';
 import { AgentDrawer, AgentsView } from './agents.js';
 import { CreateTicketModal, TicketModal } from './modals.js';
+import { CreateProjectModal, ProjectSwitcher } from './projects.js';
+import { SettingsModal } from './settings.js';
 import { LiveDot } from './util.js';
 
 export function App() {
@@ -23,6 +27,12 @@ export function App() {
   const [showCreate, setShowCreate] = useState(false);
   const [selected, setSelected] = useState<BoardIssueDTO | null>(null);
   const [agentIssueId, setAgentIssueId] = useState<string | null>(null);
+  const [caps, setCaps] = useState<Capabilities | null>(null);
+  const [projects, setProjects] = useState<ProjectDTO[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [switching, setSwitching] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showNewProject, setShowNewProject] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -37,11 +47,28 @@ export function App() {
     }
   }, []);
 
+  const refreshProjects = useCallback(async () => {
+    try {
+      const p = await api.projects();
+      setProjects(p.projects);
+      setActiveProjectId(p.active_project_id);
+    } catch {
+      /* projects unavailable (non-plane tracker) — switcher stays hidden via caps */
+    }
+  }, []);
+
   useEffect(() => {
     void refresh();
     void api
       .meta()
       .then(setMeta)
+      .catch(() => undefined);
+    void api
+      .capabilities()
+      .then((c) => {
+        setCaps(c);
+        if (c.projects) void refreshProjects();
+      })
       .catch(() => undefined);
     const poll = setInterval(() => void refresh(), 2000);
     const tick = setInterval(() => setNow(Date.now()), 1000);
@@ -49,7 +76,24 @@ export function App() {
       clearInterval(poll);
       clearInterval(tick);
     };
-  }, [refresh]);
+  }, [refresh, refreshProjects]);
+
+  const switchProject = async (projectId: string) => {
+    setSwitching(true);
+    setError(null);
+    try {
+      await api.switchProject(projectId);
+      await Promise.all([refresh(), refreshProjects()]);
+      await api
+        .meta()
+        .then(setMeta)
+        .catch(() => undefined);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSwitching(false);
+    }
+  };
 
   const sessionsById = useMemo(() => new Map(sessions.map((s) => [s.issue_id, s])), [sessions]);
   const issuesById = useMemo(() => {
@@ -102,6 +146,18 @@ export function App() {
             </span>
             <b>Symphony</b>
           </div>
+          {caps?.projects && (
+            <>
+              <span class="sep" />
+              <ProjectSwitcher
+                projects={projects}
+                activeProjectId={activeProjectId}
+                switching={switching}
+                onSwitch={(id) => void switchProject(id)}
+                onNew={() => setShowNewProject(true)}
+              />
+            </>
+          )}
           <span class="sep" />
           <span class="topmeta">
             {states.length} states{pollSec !== null ? ` · poll ${pollSec}s` : ''}
@@ -137,6 +193,16 @@ export function App() {
           <button class="btn primary" data-test="new-ticket" onClick={() => setShowCreate(true)}>
             + New ticket
           </button>
+          {caps?.settings && (
+            <button
+              class="iconbtn"
+              data-test="open-settings"
+              title="Settings"
+              onClick={() => setShowSettings(true)}
+            >
+              ⚙
+            </button>
+          )}
         </div>
       </header>
 
@@ -195,6 +261,28 @@ export function App() {
           now={now}
           onClose={() => setAgentIssueId(null)}
           onAfterAction={() => void refresh()}
+        />
+      )}
+
+      {showNewProject && (
+        <CreateProjectModal
+          onClose={() => setShowNewProject(false)}
+          onCreated={() => {
+            setShowNewProject(false);
+            void refreshProjects();
+          }}
+        />
+      )}
+
+      {showSettings && (
+        <SettingsModal
+          onClose={() => setShowSettings(false)}
+          onSaved={() =>
+            void api
+              .meta()
+              .then(setMeta)
+              .catch(() => undefined)
+          }
         />
       )}
     </div>

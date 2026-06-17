@@ -20,6 +20,23 @@ export const trackerSchema = z
   })
   .strict();
 
+/**
+ * A registered project the dashboard can switch between. A project = a Plane `project_id` plus its
+ * own git repo folder (and optionally a per-project workspace slug). The *active* project is the one
+ * whose `project_id`/`repo` currently sit in `tracker`/`workspace`; this list is the registry the
+ * dashboard's project switcher reads + appends to (via "+ New project").
+ */
+export const projectEntrySchema = z
+  .object({
+    name: z.string(),
+    project_id: z.string(),
+    repo: z.string(),
+    workspace_slug: z.string().optional(),
+    /** Plane short identifier (e.g. "SYM"); informational for the switcher. */
+    identifier: z.string().optional(),
+  })
+  .strict();
+
 export const pollingSchema = z
   .object({
     interval_ms: z.number().int().positive().default(30_000),
@@ -124,6 +141,8 @@ export const workerSchema = z
 export const configSchema = z
   .object({
     tracker: trackerSchema,
+    /** Registry of switchable projects (dashboard project switcher). */
+    projects: z.array(projectEntrySchema).default([]),
     /** Root dir for raw tmux session logs. Resolved to <tmpdir>/symphony_logs when omitted. */
     logs_root: z.string().optional(),
     polling: pollingSchema.prefault({}),
@@ -139,6 +158,7 @@ export const configSchema = z
 /** Parsed (pre-resolution) config — `$VAR`/`~` still literal. */
 export type ParsedConfig = z.infer<typeof configSchema>;
 export type TrackerConfig = z.infer<typeof trackerSchema>;
+export type ProjectEntry = z.infer<typeof projectEntrySchema>;
 export type AgentConfig = z.infer<typeof agentSchema>;
 export type WorkspaceConfig = z.infer<typeof workspaceSchema>;
 export type HooksConfig = z.infer<typeof hooksSchema>;

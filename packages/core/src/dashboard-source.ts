@@ -1,13 +1,16 @@
 import type { AgentEvent } from '@symphony/agent-backends';
 import {
+  PlaneWorkspaceClient,
   supportsActivity,
   supportsBoard,
   supportsIssueCreation,
   supportsIssueWriter,
   type IssuePatch,
   type LabelInfo,
-  type Tracker,
+  type WorkspaceProject,
 } from '@symphony/tracker';
+import type { ProjectEntry } from './config/schema.js';
+import type { WorkflowStore } from './workflow/store.js';
 import type {
   Orchestrator,
   OrchestratorSnapshot,
@@ -95,13 +98,81 @@ export interface IssueEditInput {
   labels?: string[];
 }
 
+/** A switchable project for the dashboard's project switcher. */
+export interface ProjectDTO {
+  project_id: string;
+  name: string;
+  identifier: string | null;
+  /** Local git repo folder from the registry; null when the Plane project isn't registered. */
+  repo: string | null;
+  /** Present in the WORKFLOW.md `projects` registry (switchable). */
+  registered: boolean;
+  /** Currently the active project. */
+  active: boolean;
+}
+
+export interface ProjectsDTO {
+  projects: ProjectDTO[];
+  active_project_id: string | null;
+}
+
+export interface CreateProjectInput {
+  name: string;
+  identifier: string;
+  repo: string;
+}
+
+/** Runtime preferences exposed by the settings screen (curated subset of the config). */
+export interface SettingsDTO {
+  agent: {
+    backend: string;
+    model: string | null;
+    permission_mode: string;
+    max_turns: number;
+    max_continuations: number;
+    max_concurrent_agents: number;
+    max_retry_backoff_ms: number;
+    turn_timeout_ms: number;
+    stall_timeout_ms: number;
+    tmux: boolean;
+    max_budget_usd: number | null;
+  };
+  polling: { interval_ms: number };
+  workspace: { branch_prefix: string };
+}
+
+export interface SettingsAgentPatch {
+  backend?: string;
+  model?: string | null;
+  permission_mode?: string;
+  max_turns?: number;
+  max_continuations?: number;
+  max_concurrent_agents?: number;
+  max_retry_backoff_ms?: number;
+  turn_timeout_ms?: number;
+  stall_timeout_ms?: number;
+  tmux?: boolean;
+  max_budget_usd?: number | null;
+}
+
+export interface SettingsPatch {
+  agent?: SettingsAgentPatch;
+  polling?: { interval_ms?: number };
+  workspace?: { branch_prefix?: string };
+}
+
 /** The capability surface the dashboard consumes. */
 export interface DashboardSource {
   snapshot(): OrchestratorSnapshot;
   runtimeInfo(): RuntimeInfo;
   findIssue(identifier: string): unknown;
   requestRefresh(): Promise<{ coalesced: boolean }>;
-  capabilities(): { board: boolean; write: boolean };
+  capabilities(): { board: boolean; write: boolean; projects: boolean; settings: boolean };
+  listProjects(): Promise<ProjectsDTO>;
+  switchProject(projectId: string): Promise<{ switched: boolean }>;
+  createProject(input: CreateProjectInput): Promise<ProjectDTO>;
+  getSettings(): SettingsDTO;
+  updateSettings(patch: SettingsPatch): Promise<void>;
   getBoard(): Promise<BoardData>;
   getIssueDetail(id: string): Promise<IssueDetailDTO | null>;
   listStates(): Promise<BoardStateDTO[]>;
@@ -117,15 +188,15 @@ export interface DashboardSource {
   subscribeLogs(issueId: string, cb: (ev: AgentEvent) => void): () => void;
 }
 
-/** Build the dashboard source by wiring the orchestrator + tracker (operator path). */
+/**
+ * Build the dashboard source from the orchestrator (operator path). The tracker is read **live** via
+ * `orchestrator.currentTracker()` so board/state/etc. follow a project switch. `store` (when present)
+ * backs the project-registry + settings write-back; project/settings write ops throw without it.
+ */
 export function buildDashboardSource(
   orchestrator: Orchestrator,
-  tracker: Tracker,
+  store?: WorkflowStore,
 ): DashboardSource {
-  const board = supportsBoard(tracker);
-  const writer = supportsIssueWriter(tracker);
-  const creator = supportsIssueCreation(tracker);
-
   function statusOf(id: string, snap: OrchestratorSnapshot): IssueStatus {
     if (snap.running.some((r) => r.issue_id === id)) return 'running';
     if (snap.blocked.some((b) => b.issue_id === id)) return 'blocked';
@@ -134,29 +205,198 @@ export function buildDashboardSource(
     return 'idle';
   }
 
+  /** Workspace-scoped Plane client built from the live config (follows project/workspace changes). */
+  function planeWorkspaceClient(): PlaneWorkspaceClient {
+    const t = orchestrator.currentConfig().tracker;
+    if (t.kind !== 'plane' || !t.endpoint || !t.api_key || !t.workspace_slug) {
+      throw new Error('project management requires a configured Plane tracker');
+    }
+    return new PlaneWorkspaceClient({
+      endpoint: t.endpoint,
+      apiKey: t.api_key,
+      workspaceSlug: t.workspace_slug,
+    });
+  }
+
+  function requireStore(): WorkflowStore {
+    if (!store) throw new Error('persistence unavailable: no workflow store wired');
+    return store;
+  }
+
   return {
     snapshot: () => orchestrator.snapshot(),
     runtimeInfo: () => orchestrator.runtimeInfo(),
     findIssue: (identifier) => orchestrator.findIssue(identifier),
     requestRefresh: () => orchestrator.requestRefresh(),
-    capabilities: () => ({ board, write: writer && creator }),
+    capabilities: () => {
+      const tracker = orchestrator.currentTracker();
+      return {
+        board: supportsBoard(tracker),
+        write: supportsIssueWriter(tracker) && supportsIssueCreation(tracker),
+        projects: orchestrator.currentConfig().tracker.kind === 'plane' && !!store,
+        settings: !!store,
+      };
+    },
     listSessions: () => orchestrator.listSessions(),
     terminate: (id) => orchestrator.terminate(id),
     terminateAll: () => orchestrator.terminateAll(),
     unblock: (id) => orchestrator.unblock(id),
     subscribeLogs: (id, cb) => orchestrator.subscribeLogs(id, cb),
 
+    async listProjects(): Promise<ProjectsDTO> {
+      const cfg = orchestrator.currentConfig();
+      const registry = new Map(cfg.projects.map((p) => [p.project_id, p]));
+      const active = cfg.tracker.project_id ?? null;
+      let live: WorkspaceProject[] = [];
+      try {
+        live = await planeWorkspaceClient().listProjects();
+      } catch {
+        live = []; // Plane unreachable: fall back to the registry below.
+      }
+      const byId = new Map<string, ProjectDTO>();
+      for (const lp of live) {
+        const reg = registry.get(lp.id);
+        byId.set(lp.id, {
+          project_id: lp.id,
+          name: reg?.name ?? lp.name,
+          identifier: lp.identifier || reg?.identifier || null,
+          repo: reg?.repo ?? null,
+          registered: reg !== undefined,
+          active: lp.id === active,
+        });
+      }
+      for (const p of cfg.projects) {
+        if (byId.has(p.project_id)) continue;
+        byId.set(p.project_id, {
+          project_id: p.project_id,
+          name: p.name,
+          identifier: p.identifier ?? null,
+          repo: p.repo,
+          registered: true,
+          active: p.project_id === active,
+        });
+      }
+      if (active && !byId.has(active)) {
+        byId.set(active, {
+          project_id: active,
+          name: active,
+          identifier: null,
+          repo: cfg.workspace.repo ?? null,
+          registered: false,
+          active: true,
+        });
+      }
+      return { projects: [...byId.values()], active_project_id: active };
+    },
+
+    async switchProject(projectId: string): Promise<{ switched: boolean }> {
+      const st = requireStore();
+      const entry = orchestrator.currentConfig().projects.find((p) => p.project_id === projectId);
+      if (!entry) {
+        throw new Error(`project ${projectId} is not registered; create or register it first`);
+      }
+      const mutate = (raw: Record<string, unknown>): void => {
+        const tracker = (raw['tracker'] ??= {}) as Record<string, unknown>;
+        tracker['project_id'] = entry.project_id;
+        if (entry.workspace_slug) tracker['workspace_slug'] = entry.workspace_slug;
+        const workspace = (raw['workspace'] ??= {}) as Record<string, unknown>;
+        workspace['repo'] = entry.repo;
+      };
+      const next = st.composeConfig(mutate); // validate before any teardown
+      const res = await orchestrator.switchProject(next); // atomic; throws on bad repo
+      await st.persist(mutate); // commit only after the live switch succeeds
+      return res;
+    },
+
+    async createProject(input: CreateProjectInput): Promise<ProjectDTO> {
+      const st = requireStore();
+      const cfg = orchestrator.currentConfig();
+      const ws = planeWorkspaceClient();
+      const created = await ws.createProject({ name: input.name, identifier: input.identifier });
+      await ws
+        .seedStates(created.id, [...cfg.tracker.active_states, ...cfg.tracker.terminal_states])
+        .catch(() => undefined);
+      const entry: ProjectEntry = {
+        name: input.name,
+        project_id: created.id,
+        repo: input.repo,
+        ...(created.identifier ? { identifier: created.identifier } : {}),
+      };
+      const snap = await st.persist((raw) => {
+        const list = Array.isArray(raw['projects']) ? (raw['projects'] as unknown[]) : [];
+        list.push(entry);
+        raw['projects'] = list;
+      });
+      orchestrator.applyConfig(snap.config); // make the new registry entry visible immediately
+      return {
+        project_id: created.id,
+        name: input.name,
+        identifier: created.identifier || null,
+        repo: input.repo,
+        registered: true,
+        active: false,
+      };
+    },
+
+    getSettings(): SettingsDTO {
+      const c = orchestrator.currentConfig();
+      return {
+        agent: {
+          backend: c.agent.backend,
+          model: c.agent.model ?? null,
+          permission_mode: c.agent.permission_mode,
+          max_turns: c.agent.max_turns,
+          max_continuations: c.agent.max_continuations,
+          max_concurrent_agents: c.agent.max_concurrent_agents,
+          max_retry_backoff_ms: c.agent.max_retry_backoff_ms,
+          turn_timeout_ms: c.agent.turn_timeout_ms,
+          stall_timeout_ms: c.agent.stall_timeout_ms,
+          tmux: c.agent.tmux,
+          max_budget_usd: c.agent.max_budget_usd ?? null,
+        },
+        polling: { interval_ms: c.polling.interval_ms },
+        workspace: { branch_prefix: c.workspace.branch_prefix },
+      };
+    },
+
+    async updateSettings(patch: SettingsPatch): Promise<void> {
+      const st = requireStore();
+      const mutate = (raw: Record<string, unknown>): void => {
+        if (patch.agent) {
+          const agent = (raw['agent'] ??= {}) as Record<string, unknown>;
+          for (const [k, v] of Object.entries(patch.agent)) {
+            if (v === undefined) continue;
+            if (v === null) delete agent[k];
+            else agent[k] = v;
+          }
+        }
+        if (patch.polling?.interval_ms !== undefined) {
+          const polling = (raw['polling'] ??= {}) as Record<string, unknown>;
+          polling['interval_ms'] = patch.polling.interval_ms;
+        }
+        if (patch.workspace?.branch_prefix !== undefined) {
+          const workspace = (raw['workspace'] ??= {}) as Record<string, unknown>;
+          workspace['branch_prefix'] = patch.workspace.branch_prefix;
+        }
+      };
+      const snap = await st.persist(mutate); // persist() validates (zod) before writing
+      orchestrator.applyConfig(snap.config); // apply immediately (no tracker rebuild)
+    },
+
     async listStates(): Promise<BoardStateDTO[]> {
+      const tracker = orchestrator.currentTracker();
       if (!supportsBoard(tracker)) throw new Error('tracker does not support board reads');
       return tracker.listWorkflowStates();
     },
 
     async listLabels(): Promise<LabelInfo[]> {
+      const tracker = orchestrator.currentTracker();
       if (!supportsBoard(tracker)) throw new Error('tracker does not support board reads');
       return tracker.listLabels();
     },
 
     async getBoard(): Promise<BoardData> {
+      const tracker = orchestrator.currentTracker();
       if (!supportsBoard(tracker)) throw new Error('tracker does not support board reads');
       const [issues, states] = await Promise.all([
         tracker.fetchAllIssues(),
@@ -184,6 +424,7 @@ export function buildDashboardSource(
     },
 
     async getIssueDetail(id: string): Promise<IssueDetailDTO | null> {
+      const tracker = orchestrator.currentTracker();
       if (!supportsBoard(tracker)) throw new Error('tracker does not support board reads');
       const issue = (await tracker.fetchAllIssues()).find((i) => i.id === id);
       if (!issue) return null;
@@ -208,6 +449,7 @@ export function buildDashboardSource(
     },
 
     async createTicket(input: CreateTicketInput): Promise<{ id: string; identifier: string }> {
+      const tracker = orchestrator.currentTracker();
       if (!supportsIssueCreation(tracker))
         throw new Error('tracker does not support issue creation');
       const attachments: Array<{ url: string; title: string }> = [];
@@ -232,12 +474,14 @@ export function buildDashboardSource(
     },
 
     async moveIssue(issueId: string, stateId: string): Promise<void> {
+      const tracker = orchestrator.currentTracker();
       if (!supportsIssueWriter(tracker)) throw new Error('tracker does not support state changes');
       await tracker.updateIssueState(issueId, stateId);
       orchestrator.resume(issueId);
     },
 
     async updateIssue(issueId: string, edit: IssueEditInput): Promise<void> {
+      const tracker = orchestrator.currentTracker();
       if (!supportsIssueWriter(tracker)) throw new Error('tracker does not support edits');
       const patch: IssuePatch = {};
       if (edit.title !== undefined) patch.title = edit.title;
@@ -255,6 +499,7 @@ export function buildDashboardSource(
     },
 
     async addComment(issueId: string, body: string): Promise<void> {
+      const tracker = orchestrator.currentTracker();
       if (!supportsIssueWriter(tracker)) throw new Error('tracker does not support comments');
       await tracker.addComment(issueId, body);
     },

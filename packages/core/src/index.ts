@@ -7,6 +7,7 @@ export {
   DEFAULT_TERMINAL_STATES,
   type ParsedConfig,
   type TrackerConfig,
+  type ProjectEntry,
   type AgentConfig,
   type WorkspaceConfig,
   type HooksConfig,
@@ -88,4 +89,10 @@ export {
   type CreateTicketInput,
   type CreateTicketFile,
   type IssueEditInput,
+  type ProjectDTO,
+  type ProjectsDTO,
+  type CreateProjectInput,
+  type SettingsDTO,
+  type SettingsPatch,
+  type SettingsAgentPatch,
 } from './dashboard-source.js';

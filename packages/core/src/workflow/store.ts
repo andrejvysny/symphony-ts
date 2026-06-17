@@ -1,11 +1,15 @@
 import { createHash } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { ConfigError } from '@symphony/shared';
 import type { SymphonyConfig } from '../config/resolve.js';
 import { parseConfig, resolveConfig } from '../config/resolve.js';
 import { type Logger, noopLogger } from '../observability/logger.js';
-import { parseWorkflowFile } from './loader.js';
+import { parseWorkflowFile, serializeWorkflowFile } from './loader.js';
+
+/** Mutator applied to the raw (pre-resolution) front-matter map before writing it back. */
+export type RawFrontMatter = Record<string, unknown>;
+export type ConfigMutator = (raw: RawFrontMatter) => void;
 
 export interface WorkflowSnapshot {
   config: SymphonyConfig;
@@ -27,6 +31,9 @@ export class WorkflowStore {
   private current: WorkflowSnapshot | undefined;
   private stamp: Stamp | undefined;
   private timer: NodeJS.Timeout | undefined;
+  /** Raw (pre-resolution) front-matter from the last read — the basis for write-back. */
+  private rawFrontMatter: RawFrontMatter = {};
+  private body = '';
 
   constructor(
     private readonly filePath: string,
@@ -36,9 +43,11 @@ export class WorkflowStore {
 
   /** Initial load — throws (fatal at startup) if the file is missing/invalid. */
   async load(): Promise<WorkflowSnapshot> {
-    const { snapshot, stamp } = await this.read();
+    const { snapshot, stamp, raw, body } = await this.read();
     this.current = snapshot;
     this.stamp = stamp;
+    this.rawFrontMatter = raw;
+    this.body = body;
     return snapshot;
   }
 
@@ -65,7 +74,43 @@ export class WorkflowStore {
     await this.checkReload();
   }
 
-  private async read(): Promise<{ snapshot: WorkflowSnapshot; stamp: Stamp }> {
+  /**
+   * Apply `mutate` to a clone of the current raw front matter and return the resolved config,
+   * WITHOUT writing to disk. Throws (ZodError) if the mutation produces an invalid config —
+   * callers use this to validate + preview a change before committing it via {@link persist}.
+   */
+  composeConfig(mutate: ConfigMutator): SymphonyConfig {
+    const raw = structuredClone(this.rawFrontMatter);
+    mutate(raw);
+    return resolveConfig(parseConfig(raw), path.dirname(path.resolve(this.filePath)));
+  }
+
+  /**
+   * Mutate the raw front matter and write it back to WORKFLOW.md (preserving the prompt body and
+   * `$VAR` indirection), then refresh the in-memory snapshot + stamp so the 1s poll doesn't
+   * double-reload. Returns the new snapshot.
+   */
+  async persist(mutate: ConfigMutator): Promise<WorkflowSnapshot> {
+    const raw = structuredClone(this.rawFrontMatter);
+    mutate(raw);
+    // Validate before writing so a bad mutation never lands on disk.
+    resolveConfig(parseConfig(raw), path.dirname(path.resolve(this.filePath)));
+    const content = serializeWorkflowFile(raw, this.body);
+    await writeFile(path.resolve(this.filePath), content, 'utf8');
+    const { snapshot, stamp, raw: freshRaw, body } = await this.read();
+    this.current = snapshot;
+    this.stamp = stamp;
+    this.rawFrontMatter = freshRaw;
+    this.body = body;
+    return snapshot;
+  }
+
+  private async read(): Promise<{
+    snapshot: WorkflowSnapshot;
+    stamp: Stamp;
+    raw: RawFrontMatter;
+    body: string;
+  }> {
     const abs = path.resolve(this.filePath);
     let content: string;
     let st;
@@ -81,6 +126,8 @@ export class WorkflowStore {
     return {
       snapshot: { config, promptBody },
       stamp: { mtimeMs: st.mtimeMs, size: st.size, hash },
+      raw: (frontMatter ?? {}) as RawFrontMatter,
+      body: promptBody,
     };
   }
 
@@ -96,13 +143,15 @@ export class WorkflowStore {
     if (this.stamp && st.mtimeMs === this.stamp.mtimeMs && st.size === this.stamp.size) return;
 
     try {
-      const { snapshot, stamp } = await this.read();
+      const { snapshot, stamp, raw, body } = await this.read();
       if (this.stamp && stamp.hash === this.stamp.hash) {
         this.stamp = stamp; // touched but unchanged content
         return;
       }
       this.current = snapshot;
       this.stamp = stamp;
+      this.rawFrontMatter = raw;
+      this.body = body;
       this.logger.info({ file: abs }, 'workflow reloaded');
     } catch (e) {
       this.logger.error(
