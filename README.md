@@ -67,11 +67,28 @@ symphony --help
 symphony ./WORKFLOW.md --port 4500
 ```
 
-Agent auth uses your existing local `claude` login (`~/.claude`). The agent moves tickets and posts
-comments itself via the confined `tracker_api` REST tool; the orchestrator only reads ticket state.
+Agent auth uses your existing local `claude` login (`~/.claude`). The agent drives the ticket itself
+via purpose-built tracker tools — `tracker_get_task`, `tracker_update_status`, `tracker_add_comment` —
+moving it to **Human Review** with an evidence comment when done; the orchestrator only reads ticket state.
 
 > The dashboard has **no authentication** — keep `server.host` on loopback (`127.0.0.1`). Binding to
 > a public host logs a warning and exposes the API to the network.
+
+### Agent prompting
+
+The agent runs with two Claude-optimized layers:
+
+- a **system prompt** = Claude Code's built-in preset + Symphony's operating contract (identity, the
+  gather → act → verify loop, workspace/scope containment, the tracker protocol, verification/"done",
+  and safety). It lives in `packages/core/src/prompt/system-prompt.ts`; override it wholesale with
+  `agent.system_prompt`.
+- a lean **per-issue prompt** rendered from the `WORKFLOW.md` body (Liquid, `issue.*` vars).
+
+The agent never writes raw REST: it uses the semantic tools `tracker_get_task`, `tracker_update_status`
+(status name → id resolved for it; it may only set active + `review_state`, never terminal), and
+`tracker_add_comment`. Tune reasoning with `agent.effort` (`low…max`) / `agent.thinking`
+(`adaptive`/`disabled`); set `agent.allow_raw_tracker_api: true` to also expose the raw `tracker_api`
+fallback.
 
 ### tmux supervision (CLI backends)
 

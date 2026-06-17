@@ -44,7 +44,9 @@ export class PromptBuilder {
     maxTurns: number,
     ctx: { branch?: string; gitStatus?: string } = {},
   ): string {
-    const lines = [`Continue working on ${issue.identifier} (turn ${turn} of ${maxTurns}).`];
+    const lines = [
+      `Continue working on ${issue.identifier}: "${issue.title}" (turn ${turn} of ${maxTurns}).`,
+    ];
     if (ctx.branch) lines.push(`Worktree branch: ${ctx.branch}.`);
     if (ctx.gitStatus !== undefined) {
       const status = ctx.gitStatus.trim();
@@ -55,8 +57,11 @@ export class PromptBuilder {
       );
     }
     lines.push(
-      'Resume from where you left off. When the work is complete, move the ticket to its next ' +
-        'workflow state. If you are blocked and need operator input, say so explicitly.',
+      'Resume from your last commit — do not restart work you have already done. Follow your ' +
+        'operating protocol: finish implementing and verifying the change, commit, then post a ' +
+        'summary comment with the verification output and commit SHA and move the issue to ' +
+        '"Human Review". If you are blocked, state the specific blocker in plain text and leave ' +
+        'the issue in "In Progress".',
     );
     return lines.join('\n');
   }

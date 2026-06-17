@@ -13,6 +13,7 @@ import type { ErrorCategory, NormalizedIssue } from '@symphony/shared';
 import type { Tracker } from '@symphony/tracker';
 import type { SymphonyConfig } from '../config/resolve.js';
 import { PromptBuilder } from '../prompt/builder.js';
+import { DEFAULT_AGENT_SYSTEM_PROMPT } from '../prompt/system-prompt.js';
 import { assertCwdIsWorkspace } from '../workspace/path-safety.js';
 import type { IWorkspaceManager } from '../workspace/manager.js';
 
@@ -129,9 +130,12 @@ export async function runWorker(deps: WorkerDeps, ctx: WorkerContext): Promise<W
         settingSources: config.agent.setting_sources,
         strictMcpConfig: config.agent.strict_mcp_config,
         streamPartialMessages: config.agent.stream_partial_messages,
+        systemPrompt: config.agent.system_prompt ?? DEFAULT_AGENT_SYSTEM_PROMPT,
         issueRef: { id: issue.id, identifier: issue.identifier, title: issue.title },
       };
       if (config.agent.model !== undefined) runOpts.model = config.agent.model;
+      if (config.agent.effort !== undefined) runOpts.effort = config.agent.effort;
+      if (config.agent.thinking !== undefined) runOpts.thinking = config.agent.thinking;
       if (config.agent.max_budget_usd !== undefined)
         runOpts.maxBudgetUsd = config.agent.max_budget_usd;
       if (config.agent.allowed_tools !== undefined)

@@ -36,11 +36,17 @@ stream-json family (claude/codex/opencode).
   lives entirely here — the orchestrator only records the session name and aborts (abort → kill).
 - `packages/tracker` — `Tracker` interface, `PlaneTracker` (REST adapter over a local self-hosted
   Plane; read-mostly + `createIssue`), `MemoryTracker` (tests), `PlaneClient` (retry/backoff REST
-  transport in `http/transport.ts`), and the shared `tracker_api` tool executor (a **path-confined
-  REST passthrough** to the configured project). Plane runs locally via `infra/plane/` (`pnpm plane:up`).
+  transport in `http/transport.ts`), and the agent-facing tracker tools: the semantic
+  `tracker_get_task`/`tracker_update_status`/`tracker_add_comment` executors (`tools/plane-semantic.ts`,
+  shared by the SDK + stdio MCP servers) plus an opt-in raw `tracker_api` passthrough
+  (`tools/plane-rest.ts`, **path-confined**). Plane runs locally via `infra/plane/` (`pnpm plane:up`).
 - `packages/core/src/workspace` — git worktrees off one shared clone, hooks, path-safety invariants.
 - `packages/core/src/config` + `workflow` — zod schema, `$VAR`/`~` resolution, WorkflowStore hot-reload
   (1s stat-poll, last-known-good on bad reload).
+- `packages/core/src/prompt` — `system-prompt.ts` (the Claude-optimized operating contract appended to
+  the `claude_code` preset on every turn; override via `agent.system_prompt`) + `builder.ts` (renders
+  the per-issue `WORKFLOW.md` body via Liquid, plus continuation guidance). `agent.effort`/
+  `agent.thinking` tune reasoning depth.
 - `apps/dashboard` — fastify JSON API (`/api/v1/state|:id|refresh`) + the HTML board view.
 
 ## Conventions
@@ -58,7 +64,9 @@ stream-json family (claude/codex/opencode).
 ## Invariants (do not break)
 
 - Agent cwd must equal the worktree path; worktree must stay under `workspace.root` (path-safety).
-- Tracker is read-only from the orchestrator — the agent moves tickets via the `tracker_api` REST tool.
+- Tracker is read-only from the orchestrator — the agent moves tickets via the semantic tracker tools
+  (`tracker_get_task`/`tracker_update_status`/`tracker_add_comment`); the raw `tracker_api` passthrough
+  is opt-in (`agent.allow_raw_tracker_api`). The agent may only set active + `review_state`, not terminal.
 - Plane has no public issue-relations endpoint, so `blockedBy` is always `[]` (auto-skip disabled); the
   orchestrator compares state **names** while Plane mutates by state **UUID** (the adapter joins them).
 - Token accounting uses absolute totals only (delta = max(0, next − lastReported)).
@@ -89,7 +97,7 @@ stream-json family (claude/codex/opencode).
 - **Hermeticity is configurable** (`agent.setting_sources` default `['project','local']`,
   `agent.strict_mcp_config` default true): the SDK drops host-global `user` settings by default and the
   CLI passes `--strict-mcp-config`, so per-issue runs are reproducible and don't inherit MCP servers that
-  can stall a turn. The `tracker_api` tool is always passed explicitly, so this is safe.
+  can stall a turn. The tracker tools are always passed explicitly, so this is safe.
 - **Durable audit log** (`agent.persist_run_log`, default true): the worker appends every `AgentEvent`
   to `logs_root/<identifier>/<turn>/events.jsonl` (secrets redacted) for all backends — tests set it
   `false` to avoid file I/O. The CLI engine also folds non-JSON stdout lines into failure diagnostics

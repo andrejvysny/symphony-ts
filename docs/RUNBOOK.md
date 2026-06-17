@@ -124,8 +124,9 @@ node apps/cli/dist/main.js ./WORKFLOW.md --port 4500
 
 1. Within `polling.interval_ms`, the Todo ticket is dispatched (dashboard shows it **running**).
 2. A worktree appears at `<workspace.root>/<IDENTIFIER>` (shared clone at `<root>/.repo`).
-3. Claude Code works in the worktree, commits to branch `symphony/<IDENTIFIER>`, and uses
-   `mcp__symphony__tracker_api` to move the ticket to **Human Review** + post a comment.
+3. Claude Code works in the worktree, commits to branch `symphony/<IDENTIFIER>`, and uses the
+   `tracker_update_status` + `tracker_add_comment` tools to move the ticket to **Human Review** +
+   post an evidence comment.
 4. The worker's post-turn state check sees a non-active state → **releases** the issue, **preserves**
    the worktree (orchestrator logs `stopped: non-active state`).
 
@@ -141,18 +142,18 @@ git log --oneline -3 && git status
 
 ## Troubleshooting / known gotchas
 
-| Symptom                                       | Likely cause                                                   | Fix                                                                                                                                                                            |
-| --------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Nothing dispatches                            | `active_states`/state names don't match Plane (case-sensitive) | Match state names exactly; "Cancelled" is spelled with two l's by default                                                                                                      |
-| `tracker.api_key required for plane` at start | `PLANE_API_KEY` unset / empty                                  | `export PLANE_API_KEY=plane_api_...` before running                                                                                                                            |
-| `Plane HTTP 403`                              | bad / revoked `X-API-Key`                                      | Regenerate the Personal Access Token                                                                                                                                           |
-| `Plane HTTP 404` on every call                | wrong `workspace_slug` or `project_id`                         | Re-copy the slug from the URL and the project UUID from settings                                                                                                               |
-| Worktree clone error                          | `workspace.repo` path wrong or not a git repo                  | Point at a real local repo with ≥1 commit                                                                                                                                      |
-| Agent can't move the ticket                   | MCP tool not reached                                           | Prompt names `mcp__symphony__tracker_api`; wired for `claude-sdk` (in-process) and `claude-cli` (stdio MCP via `--mcp-config`). `codex-cli`/`opencode-cli` do not wire MCP yet |
-| Ticket never leaves active                    | Plane moves issues by state **UUID**, not name                 | The prompt resolves it (`GET /states/` → find "Human Review".id → `PATCH /work-items/{id}/ {state}`); keep that recipe if you customize the prompt                             |
-| Blocked issues still dispatched               | `blockedBy` is always `[]` under Plane (see Limitations)       | Keep blocked issues out of `active_states`                                                                                                                                     |
-| `git commit` fails ("who are you")            | worktree has no git identity                                   | Set global `git config user.*` or use the `after_create` snippet                                                                                                               |
-| Runaway turns / cost                          | agent never reaches a terminal/parked state                    | `max_continuations` (→ blocked) and `max_budget_usd` cap it                                                                                                                    |
+| Symptom                                       | Likely cause                                                   | Fix                                                                                                                                                                                                                 |
+| --------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Nothing dispatches                            | `active_states`/state names don't match Plane (case-sensitive) | Match state names exactly; "Cancelled" is spelled with two l's by default                                                                                                                                           |
+| `tracker.api_key required for plane` at start | `PLANE_API_KEY` unset / empty                                  | `export PLANE_API_KEY=plane_api_...` before running                                                                                                                                                                 |
+| `Plane HTTP 403`                              | bad / revoked `X-API-Key`                                      | Regenerate the Personal Access Token                                                                                                                                                                                |
+| `Plane HTTP 404` on every call                | wrong `workspace_slug` or `project_id`                         | Re-copy the slug from the URL and the project UUID from settings                                                                                                                                                    |
+| Worktree clone error                          | `workspace.repo` path wrong or not a git repo                  | Point at a real local repo with ≥1 commit                                                                                                                                                                           |
+| Agent can't move the ticket                   | MCP tools not reached                                          | Tracker tools (`tracker_get_task`/`tracker_update_status`/`tracker_add_comment`) wire for `claude-sdk` (in-process) and `claude-cli` (stdio MCP via `--mcp-config`). `codex-cli`/`opencode-cli` do not wire MCP yet |
+| Ticket never leaves active                    | Status name not in the project / not settable                  | `tracker_update_status` resolves the name → state id for the agent and only accepts active + `review_state` names; ensure your Plane states match `active_states` + `review_state` exactly                          |
+| Blocked issues still dispatched               | `blockedBy` is always `[]` under Plane (see Limitations)       | Keep blocked issues out of `active_states`                                                                                                                                                                          |
+| `git commit` fails ("who are you")            | worktree has no git identity                                   | Set global `git config user.*` or use the `after_create` snippet                                                                                                                                                    |
+| Runaway turns / cost                          | agent never reaches a terminal/parked state                    | `max_continuations` (→ blocked) and `max_budget_usd` cap it                                                                                                                                                         |
 
 ## Limitations (Plane)
 

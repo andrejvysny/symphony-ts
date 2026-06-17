@@ -17,6 +17,8 @@ export const trackerSchema = z
     assignee: z.string().optional(),
     active_states: z.array(z.string()).default(DEFAULT_ACTIVE_STATES),
     terminal_states: z.array(z.string()).default(DEFAULT_TERMINAL_STATES),
+    /** Non-active, non-terminal "park" state the agent moves an issue to for human review. */
+    review_state: z.string().default('Human Review'),
   })
   .strict();
 
@@ -55,6 +57,14 @@ export const agentSchema = z
   .object({
     backend: z.enum(agentBackendKinds).default('claude-sdk'),
     model: z.string().optional(),
+    /** APPEND text layered on the `claude_code` system-prompt preset; overrides the built-in default. */
+    system_prompt: z.string().optional(),
+    /** Reasoning effort (SDK `effort`). Omit to use the model default ('high'). */
+    effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+    /** Thinking mode (SDK `thinking`): `adaptive` (Claude decides depth) or `disabled`. */
+    thinking: z.enum(['adaptive', 'disabled']).optional(),
+    /** Also expose the raw `tracker_api` REST passthrough alongside the semantic tracker tools. */
+    allow_raw_tracker_api: z.boolean().default(false),
     max_budget_usd: z.number().positive().optional(),
     permission_mode: z.enum(permissionModes).default('bypassPermissions'),
     allowed_tools: z.array(z.string()).optional(),

@@ -139,4 +139,31 @@ describe('ClaudeCodeSdkBackend', () => {
     expect(result.status).toBe('blocked');
     expect(events.some((e) => e.type === 'input_required')).toBe(true);
   });
+
+  it('layers the claude_code preset with our append + wires effort/thinking', async () => {
+    queryMock.mockImplementation(() => fromArray(SUCCESS));
+    await drain({
+      ...base,
+      systemPrompt: 'OPERATING CONTRACT',
+      effort: 'high',
+      thinking: 'adaptive',
+    });
+    const options = queryMock.mock.calls.at(-1)![0].options;
+    expect(options.systemPrompt).toEqual({
+      type: 'preset',
+      preset: 'claude_code',
+      append: 'OPERATING CONTRACT',
+    });
+    expect(options.effort).toBe('high');
+    expect(options.thinking).toEqual({ type: 'adaptive' });
+  });
+
+  it('defaults to the bare claude_code preset when no systemPrompt is given', async () => {
+    queryMock.mockImplementation(() => fromArray(SUCCESS));
+    await drain(base);
+    const options = queryMock.mock.calls.at(-1)![0].options;
+    expect(options.systemPrompt).toEqual({ type: 'preset', preset: 'claude_code' });
+    expect(options.effort).toBeUndefined();
+    expect(options.thinking).toBeUndefined();
+  });
 });

@@ -1,66 +1,73 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildStdioTrackerServer } from './stdio-tracker-server.js';
+import { buildStdioTrackerServer, type TrackerStdioToolDeps } from './stdio-tracker-server.js';
 import type { ToolResult } from './plane-rest.js';
 
-describe('buildStdioTrackerServer', () => {
-  it('registers a tool named tracker_api', () => {
-    const executor = vi.fn<() => Promise<ToolResult>>();
-    const server = buildStdioTrackerServer(executor);
+function okExec() {
+  return vi
+    .fn<(input: unknown) => Promise<ToolResult>>()
+    .mockResolvedValue({ success: true, output: JSON.stringify({ data: { ok: true } }) });
+}
 
-    // McpServer stores registered tools in _registeredTools (internal map)
-    const tools = (server as unknown as { _registeredTools: Record<string, unknown> })
-      ._registeredTools;
+function deps(over: Partial<TrackerStdioToolDeps> = {}): TrackerStdioToolDeps {
+  return {
+    getTask: okExec(),
+    updateStatus: okExec(),
+    addComment: okExec(),
+    allowedStates: ['Todo', 'In Progress', 'Human Review'],
+    ...over,
+  };
+}
+
+function registered(
+  server: unknown,
+): Record<string, { handler: (a: unknown) => Promise<unknown> }> {
+  return (
+    server as { _registeredTools: Record<string, { handler: (a: unknown) => Promise<unknown> }> }
+  )._registeredTools;
+}
+
+describe('buildStdioTrackerServer', () => {
+  it('registers the three semantic tracker tools (no tracker_api by default)', () => {
+    const tools = registered(buildStdioTrackerServer(deps()));
+    expect(Object.keys(tools).sort()).toEqual([
+      'tracker_add_comment',
+      'tracker_get_task',
+      'tracker_update_status',
+    ]);
+  });
+
+  it('exposes tracker_api only when a rawApi executor is provided', () => {
+    const rawApi = okExec();
+    const tools = registered(buildStdioTrackerServer(deps({ rawApi })));
     expect(Object.keys(tools)).toContain('tracker_api');
   });
 
-  it('routes a valid call to the executor and returns content with text', async () => {
-    const executor = vi.fn<(input: unknown) => Promise<ToolResult>>().mockResolvedValue({
+  it('routes a call to the matching executor and wraps the output as text content', async () => {
+    const getTask = vi.fn<(i: unknown) => Promise<ToolResult>>().mockResolvedValue({
       success: true,
-      output: JSON.stringify({ data: [{ id: 'state-1' }] }),
+      output: JSON.stringify({ data: { title: 'Add login' } }),
     });
-    const server = buildStdioTrackerServer(executor);
-
-    const tools = (
-      server as unknown as {
-        _registeredTools: Record<string, { handler: (args: unknown) => Promise<unknown> }>;
-      }
-    )._registeredTools;
-
-    const handler = tools['tracker_api']?.handler;
-    expect(handler).toBeDefined();
-
-    const result = (await handler?.({ method: 'GET', path: '/states/' })) as {
+    const tools = registered(buildStdioTrackerServer(deps({ getTask })));
+    const res = (await tools['tracker_get_task']?.handler({ task_id: 'abc' })) as {
       content: Array<{ type: string; text: string }>;
       isError: boolean;
     };
-
-    expect(executor).toHaveBeenCalledWith({ method: 'GET', path: '/states/' });
-    expect(result.content).toHaveLength(1);
-    expect(result.content[0]?.type).toBe('text');
-    expect(result.content[0]?.text).toContain('state-1');
-    expect(result.isError).toBe(false);
+    expect(getTask).toHaveBeenCalledWith({ task_id: 'abc' });
+    expect(res.content[0]?.type).toBe('text');
+    expect(res.content[0]?.text).toContain('Add login');
+    expect(res.isError).toBe(false);
   });
 
-  it('sets isError:true when executor returns success:false', async () => {
-    const executor = vi.fn<(input: unknown) => Promise<ToolResult>>().mockResolvedValue({
-      success: false,
-      output: JSON.stringify({ error: 'something went wrong' }),
-    });
-    const server = buildStdioTrackerServer(executor);
-
-    const tools = (
-      server as unknown as {
-        _registeredTools: Record<string, { handler: (args: unknown) => Promise<unknown> }>;
-      }
-    )._registeredTools;
-
-    const handler = tools['tracker_api']?.handler;
-    const result = (await handler?.({ method: 'GET', path: '/work-items/' })) as {
-      content: Array<{ type: string; text: string }>;
-      isError: boolean;
-    };
-
-    expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toContain('something went wrong');
+  it('sets isError:true when an executor returns success:false', async () => {
+    const updateStatus = vi
+      .fn<(i: unknown) => Promise<ToolResult>>()
+      .mockResolvedValue({ success: false, output: JSON.stringify({ error: 'nope' }) });
+    const tools = registered(buildStdioTrackerServer(deps({ updateStatus })));
+    const res = (await tools['tracker_update_status']?.handler({
+      task_id: 'abc',
+      status: 'Todo',
+    })) as { content: Array<{ text: string }>; isError: boolean };
+    expect(res.isError).toBe(true);
+    expect(res.content[0]?.text).toContain('nope');
   });
 });

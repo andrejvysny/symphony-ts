@@ -35,7 +35,19 @@ export {
   type ToolResult,
   type RestFn,
 } from './tools/plane-rest.js';
-export { buildStdioTrackerServer } from './tools/stdio-tracker-server.js';
+export {
+  buildStdioTrackerServer,
+  type TrackerStdioToolDeps,
+} from './tools/stdio-tracker-server.js';
+export {
+  makePlaneSemanticTools,
+  TRACKER_GET_TASK_DESCRIPTION,
+  TRACKER_UPDATE_STATUS_DESCRIPTION,
+  TRACKER_ADD_COMMENT_DESCRIPTION,
+  type PlaneSemanticTools,
+  type SemanticPlaneClient,
+  type TrackerExecutor,
+} from './tools/plane-semantic.js';
 export { type Transport, type TransportResponse } from './http/transport.js';
 export {
   makeSetIssueStateExecutor,

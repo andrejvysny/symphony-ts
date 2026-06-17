@@ -53,6 +53,8 @@ export const claudeCliDef: AgentDef = {
     ...(o.maxTurns ? ['--max-turns', String(o.maxTurns)] : []),
     '--permission-mode',
     o.permissionMode ?? 'bypassPermissions',
+    // Symphony's operating contract layered on Claude Code's built-in system prompt.
+    ...(o.systemPrompt ? ['--append-system-prompt', o.systemPrompt] : []),
     // Hermetic by default: ignore the host's global/project MCP servers (which can stall a turn);
     // only Symphony's own `--mcp-config` servers load. Disabled with strictMcpConfig === false.
     ...(o.strictMcpConfig !== false ? ['--strict-mcp-config'] : []),

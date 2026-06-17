@@ -49,6 +49,7 @@ export { resultFromEvents, type ParseCtx } from './cli-stream-json/parsers/commo
 // MCP tool wiring
 export {
   buildTrackerSdkMcpServer,
+  type TrackerSdkToolDeps,
   type TrackerApiExecutor,
   type TrackerToolResult,
 } from './mcp/sdk-tracker-tool.js';

@@ -32,6 +32,12 @@ export interface RunOptions {
   /** MUST equal the worktree path; the caller validates before invoking. */
   cwd: string;
   model?: string;
+  /** APPEND text layered on the `claude_code` system-prompt preset (SDK) / `--append-system-prompt` (CLI). */
+  systemPrompt?: string;
+  /** Reasoning effort (SDK `effort`); higher = deeper reasoning, more tokens. */
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  /** Thinking mode (SDK `thinking`): `adaptive` lets Claude decide depth; `disabled` turns it off. */
+  thinking?: 'adaptive' | 'disabled';
   maxTurns?: number;
   maxBudgetUsd?: number;
   permissionMode?: PermissionMode;

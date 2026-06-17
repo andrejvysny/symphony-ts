@@ -105,6 +105,15 @@ export class ClaudeCodeSdkBackend implements CodingAgentBackend {
       // connected to one transport at a time, so concurrent runs must not share one.
       options.mcpServers = opts.mcpConfig.sdkServers() as Record<string, McpServerConfig>;
     }
+    // System prompt: layer Symphony's operating contract on Claude Code's built-in preset
+    // (its tool/coding/safety guidance) instead of the SDK's bare default (which omits them).
+    options.systemPrompt =
+      opts.systemPrompt !== undefined && opts.systemPrompt.length > 0
+        ? { type: 'preset', preset: 'claude_code', append: opts.systemPrompt }
+        : { type: 'preset', preset: 'claude_code' };
+    if (opts.effort !== undefined) options.effort = opts.effort;
+    if (opts.thinking !== undefined)
+      options.thinking = opts.thinking === 'adaptive' ? { type: 'adaptive' } : { type: 'disabled' };
 
     let sessionId: string | undefined;
     let result: RunResult | undefined;
