@@ -107,6 +107,10 @@ async function runOrchestrator(args: Args): Promise<void> {
     logger,
     promptBuilder: new PromptBuilder(promptBody),
     reload: () => store.snapshot(),
+    // Factories let the dashboard live-switch the active project (rebuild tracker/mcp/workspace).
+    trackerFactory: buildTracker,
+    mcpConfigFactory: buildMcpConfig,
+    workspaceManagerFactory: buildWorkspaceManager,
     ...(mcpConfig !== undefined ? { mcpConfig } : {}),
   });
 
@@ -114,7 +118,7 @@ async function runOrchestrator(args: Args): Promise<void> {
   const port = typeof portFlag === 'string' ? Number(portFlag) : (config.server?.port ?? undefined);
   let dashboard: Awaited<ReturnType<typeof startDashboard>> | undefined;
   if (port !== undefined && Number.isFinite(port)) {
-    dashboard = await startDashboard(buildDashboardSource(orchestrator, tracker), {
+    dashboard = await startDashboard(buildDashboardSource(orchestrator, store), {
       port,
       host: config.server?.host ?? '127.0.0.1',
       onNonLoopback: (h) =>

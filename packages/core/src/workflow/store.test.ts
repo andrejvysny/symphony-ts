@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -73,5 +73,71 @@ describe('WorkflowStore', () => {
     await writeFile(file, INVALID);
     const store = new WorkflowStore(file);
     await expect(store.load()).rejects.toThrow();
+  });
+
+  it('composeConfig applies a mutation without writing the file', async () => {
+    const store = new WorkflowStore(file);
+    await store.load();
+    const next = store.composeConfig((raw) => {
+      (raw['polling'] as Record<string, unknown>).interval_ms = 12_345;
+    });
+    expect(next.polling.interval_ms).toBe(12_345);
+    // file on disk is untouched + the in-memory snapshot is unchanged
+    expect(await readFile(file, 'utf8')).toBe(VALID);
+    expect(store.snapshot().config.polling.interval_ms).toBe(5000);
+  });
+
+  it('composeConfig throws on an invalid mutation', async () => {
+    const store = new WorkflowStore(file);
+    await store.load();
+    expect(() =>
+      store.composeConfig((raw) => {
+        (raw['polling'] as Record<string, unknown>).interval_ms = -1; // must be positive
+      }),
+    ).toThrow();
+  });
+
+  it('persist writes the mutation, preserves the body + $VAR, and refreshes the snapshot', async () => {
+    const withVar = `---
+tracker:
+  kind: memory
+  api_key: $MY_SECRET
+projects: []
+workspace:
+  repo: /tmp/r
+polling:
+  interval_ms: 5000
+---
+Keep this body`;
+    await writeFile(file, withVar);
+    const store = new WorkflowStore(file);
+    await store.load();
+
+    const snap = await store.persist((raw) => {
+      const list = (raw['projects'] as unknown[]) ?? [];
+      list.push({ name: 'Beta', project_id: 'p2', repo: '~/code/beta' });
+      raw['projects'] = list;
+      (raw['polling'] as Record<string, unknown>).interval_ms = 7777;
+    });
+
+    expect(snap.config.polling.interval_ms).toBe(7777);
+    expect(snap.config.projects).toHaveLength(1);
+    expect(store.snapshot().config.polling.interval_ms).toBe(7777);
+
+    const onDisk = await readFile(file, 'utf8');
+    expect(onDisk).toContain('$MY_SECRET'); // secret indirection NOT expanded
+    expect(onDisk).toContain('Keep this body'); // prompt body preserved
+    expect(onDisk).toContain('project_id: p2');
+  });
+
+  it('persist rejects an invalid mutation before writing', async () => {
+    const store = new WorkflowStore(file);
+    await store.load();
+    await expect(
+      store.persist((raw) => {
+        (raw['tracker'] as Record<string, unknown>).bogus = true; // strict schema rejects
+      }),
+    ).rejects.toThrow();
+    expect(await readFile(file, 'utf8')).toBe(VALID); // file untouched
   });
 });

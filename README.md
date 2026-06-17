@@ -70,6 +70,12 @@ symphony ./WORKFLOW.md --port 4500
 Agent auth uses your existing local `claude` login (`~/.claude`). The agent moves tickets and posts
 comments itself via the confined `tracker_api` REST tool; the orchestrator only reads ticket state.
 
+The dashboard header has a **project switcher** (switch between registered projects, or "+ New
+project" to create a Plane project + register its repo). Switching live re-points the orchestrator —
+running agents stop, the tracker + repo swap, and polling resumes — with no restart. A **Settings**
+panel edits runtime preferences (backend, concurrency, timeouts, poll interval, branch prefix),
+persisted to `WORKFLOW.md` and applied live. Registered projects live in `WORKFLOW.md` `projects:`.
+
 > The dashboard has **no authentication** — keep `server.host` on loopback (`127.0.0.1`). Binding to
 > a public host logs a warning and exposes the API to the network.
 

@@ -44,7 +44,11 @@ export function testConfig(overrides: Record<string, unknown> = {}): SymphonyCon
 export class FakeWorkspaceManager implements IWorkspaceManager {
   readonly created: string[] = [];
   readonly cleaned: string[] = [];
+  initCount = 0;
 
+  async init(): Promise<void> {
+    this.initCount += 1;
+  }
   async createForIssue(issue: NormalizedIssue): Promise<Workspace> {
     this.created.push(issue.id);
     return {
