@@ -7,7 +7,9 @@ import type {
   IssueActivity,
   IssueComment,
   IssueCreator,
+  IssuePatch,
   IssueWriter,
+  LabelInfo,
   Tracker,
   UploadInput,
   WorkflowStateInfo,
@@ -235,10 +237,27 @@ export class PlaneTracker
     return (await this.states()).map((s) => ({ ...s }));
   }
 
+  async listLabels(): Promise<LabelInfo[]> {
+    return [...(await this.labelNameById())].map(([id, name]) => ({ id, name }));
+  }
+
   // ---- IssueWriter (operator path) ----
 
   async updateIssueState(issueId: string, stateId: string): Promise<void> {
     await this.client.request('PATCH', `${WORK_ITEMS}${issueId}/`, { state: stateId });
+  }
+
+  async updateIssue(issueId: string, patch: IssuePatch): Promise<void> {
+    const body: Record<string, unknown> = {};
+    if (patch.title !== undefined) body['name'] = patch.title;
+    if (patch.description !== undefined)
+      body['description_html'] = patch.description ? toHtml(patch.description) : '<p></p>';
+    // Update sends an explicit 'none' to clear (intToPlanePriority returns undefined for none).
+    if (patch.priority !== undefined)
+      body['priority'] = intToPlanePriority(patch.priority ?? undefined) ?? 'none';
+    if (patch.labelIds !== undefined) body['labels'] = patch.labelIds;
+    if (Object.keys(body).length === 0) return;
+    await this.client.request('PATCH', `${WORK_ITEMS}${issueId}/`, body);
   }
 
   async addComment(issueId: string, body: string): Promise<void> {

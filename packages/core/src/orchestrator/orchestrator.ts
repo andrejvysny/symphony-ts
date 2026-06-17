@@ -215,9 +215,13 @@ export class Orchestrator {
       session_id: e.sessionId,
       tmux_session: e.tmuxSession,
       pid: e.pid,
+      backend: this.backend.kind,
       started_at: new Date(e.startedAt).toISOString(),
       last_event: e.lastEvent,
+      last_event_at: e.lastEventAt !== null ? new Date(e.lastEventAt).toISOString() : null,
+      last_action: lastActionLabel(e.eventBuffer),
       turn_count: e.turnCount,
+      continuation_count: this.state.continuations.get(e.issue.id) ?? 0,
       workspace_path: e.workspacePath,
       tokens: {
         input_tokens: e.tokens.inputTokens,
@@ -225,6 +229,19 @@ export class Orchestrator {
         total_tokens: e.tokens.totalTokens,
       },
     }));
+  }
+
+  /** Static run-wide constants the dashboard renders (capacity, caps, backend). */
+  runtimeInfo(): RuntimeInfo {
+    return {
+      backend: this.backend.kind,
+      branch_prefix: this.config.workspace.branch_prefix,
+      max_concurrent_agents: this.config.agent.max_concurrent_agents,
+      poll_interval_ms: this.config.polling.interval_ms,
+      max_turns: this.config.agent.max_turns,
+      max_continuations: this.config.agent.max_continuations,
+      stall_timeout_ms: this.config.agent.stall_timeout_ms,
+    };
   }
 
   // ---- serial mutation queue ----
@@ -693,9 +710,57 @@ export interface SessionInfo {
   session_id: string | null;
   tmux_session: string | null;
   pid: number | null;
+  /** Backend kind driving this session (e.g. claude-sdk, claude-cli, codex-cli). */
+  backend: string;
   started_at: string;
   last_event: string | null;
+  /** ISO timestamp of the most recent agent event (drives the stall watchdog). */
+  last_event_at: string | null;
+  /** Human label for the most recent meaningful action (e.g. "Edit: index.ts"). */
+  last_action: string | null;
   turn_count: number;
+  /** Consecutive continuation re-dispatches for this issue (0 on a fresh dispatch). */
+  continuation_count: number;
   workspace_path: string | null;
   tokens: { input_tokens: number; output_tokens: number; total_tokens: number };
+}
+
+/** Run-wide constants the dashboard renders (capacity gauge, caps, configured backend). */
+export interface RuntimeInfo {
+  backend: string;
+  /** Git branch prefix (e.g. "symphony/"); branch = `${branch_prefix}${identifier}`. */
+  branch_prefix: string;
+  max_concurrent_agents: number;
+  poll_interval_ms: number;
+  max_turns: number;
+  max_continuations: number;
+  stall_timeout_ms: number;
+}
+
+function summarizeActionArg(input: unknown): string | undefined {
+  if (input === null || typeof input !== 'object') return undefined;
+  const o = input as Record<string, unknown>;
+  for (const k of ['file_path', 'path', 'notebook_path', 'command', 'pattern', 'url', 'query']) {
+    const v = o[k];
+    if (typeof v === 'string' && v.trim() !== '') return v.trim();
+  }
+  return undefined;
+}
+
+/** Most recent meaningful action from a session's event buffer, for card/drawer signals. */
+export function lastActionLabel(buffer: AgentEvent[]): string | null {
+  for (let i = buffer.length - 1; i >= 0; i--) {
+    const ev = buffer[i];
+    if (ev === undefined) continue;
+    if (ev.type === 'tool_use') {
+      const arg = summarizeActionArg(ev.input);
+      const label = arg !== undefined ? `${ev.toolName}: ${arg}` : ev.toolName;
+      return label.length > 64 ? `${label.slice(0, 63)}…` : label;
+    }
+    if (ev.type === 'text_delta') {
+      const t = ev.text.replace(/\s+/g, ' ').trim();
+      if (t !== '') return t.length > 64 ? `${t.slice(0, 63)}…` : t;
+    }
+  }
+  return null;
 }

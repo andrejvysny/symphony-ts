@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import Fastify, { type FastifyInstance } from 'fastify';
-import type { CreateTicketInput, DashboardSource } from '@symphony/core';
+import type { CreateTicketInput, DashboardSource, IssueEditInput } from '@symphony/core';
 import { DASHBOARD_HTML } from './html.js';
 
 export type { DashboardSource } from '@symphony/core';
@@ -42,6 +42,9 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
   app.get('/api/v1/state', async () => source.snapshot());
   app.route({ method: [...OTHER_METHODS], url: '/api/v1/state', handler: methodNotAllowed });
 
+  app.get('/api/v1/meta', async () => source.runtimeInfo());
+  app.route({ method: [...OTHER_METHODS], url: '/api/v1/meta', handler: methodNotAllowed });
+
   app.get('/api/v1/board', async (_req, reply) => {
     try {
       return await source.getBoard();
@@ -59,6 +62,16 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
       return reply
         .code(503)
         .send({ error: { code: 'states_unavailable', message: (e as Error).message } });
+    }
+  });
+
+  app.get('/api/v1/labels', async (_req, reply) => {
+    try {
+      return await source.listLabels();
+    } catch (e) {
+      return reply
+        .code(503)
+        .send({ error: { code: 'labels_unavailable', message: (e as Error).message } });
     }
   });
 
@@ -116,6 +129,29 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
         return reply
           .code(502)
           .send({ error: { code: 'move_failed', message: (e as Error).message } });
+      }
+    },
+  );
+
+  app.patch<{ Params: { id: string }; Body: IssueEditInput }>(
+    '/api/v1/issues/:id',
+    async (req, reply) => {
+      const b = req.body ?? {};
+      const edit: IssueEditInput = {};
+      if (typeof b.title === 'string') edit.title = b.title;
+      if (typeof b.description === 'string') edit.description = b.description;
+      if (b.priority === null || typeof b.priority === 'number') edit.priority = b.priority;
+      if (Array.isArray(b.labels)) edit.labels = b.labels.filter((l) => typeof l === 'string');
+      if (Object.keys(edit).length === 0) {
+        return reply.code(400).send({ error: { code: 'empty_edit' } });
+      }
+      try {
+        await source.updateIssue(req.params.id, edit);
+        return reply.code(200).send({ ok: true });
+      } catch (e) {
+        return reply
+          .code(502)
+          .send({ error: { code: 'update_failed', message: (e as Error).message } });
       }
     },
   );

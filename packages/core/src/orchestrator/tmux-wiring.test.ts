@@ -78,6 +78,11 @@ describe('tmux wiring', () => {
     expect(sessions).toHaveLength(1);
     expect(sessions[0]?.tmux_session).toBe('symphony-ENG-1');
     expect(sessions[0]?.pid).toBe(999);
+    // Dashboard signal fields surfaced from the running entry / configured backend.
+    expect(sessions[0]?.backend).toBe('claude-cli');
+    expect(sessions[0]?.continuation_count).toBe(0);
+    expect(sessions[0]).toHaveProperty('last_action');
+    expect(sessions[0]).toHaveProperty('last_event_at');
     await o.terminate('1');
   });
 

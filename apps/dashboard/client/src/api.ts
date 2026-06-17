@@ -55,11 +55,63 @@ export interface SessionInfo {
   session_id: string | null;
   tmux_session: string | null;
   pid: number | null;
+  backend: string;
   started_at: string;
   last_event: string | null;
+  last_event_at: string | null;
+  last_action: string | null;
   turn_count: number;
+  continuation_count: number;
   workspace_path: string | null;
   tokens: { input_tokens: number; output_tokens: number; total_tokens: number };
+}
+
+export interface RuntimeInfo {
+  backend: string;
+  branch_prefix: string;
+  max_concurrent_agents: number;
+  poll_interval_ms: number;
+  max_turns: number;
+  max_continuations: number;
+  stall_timeout_ms: number;
+}
+export interface LabelInfo {
+  id: string;
+  name: string;
+}
+export interface IssueEdit {
+  title?: string;
+  description?: string;
+  priority?: number | null;
+  labels?: string[];
+}
+
+export interface SnapshotBlocked {
+  issue_id: string;
+  issue_identifier: string;
+  reason: string;
+  blocked_at: string;
+}
+export interface SnapshotRetry {
+  issue_id: string;
+  issue_identifier: string;
+  attempt: number;
+  delay_type: string;
+  due_at: string;
+  error: string | null;
+}
+export interface StateSnapshot {
+  counts: {
+    running: number;
+    claimed: number;
+    blocked: number;
+    retrying: number;
+    completed: number;
+    paused: number;
+  };
+  paused: string[];
+  blocked: SnapshotBlocked[];
+  retrying: SnapshotRetry[];
 }
 
 async function jsonOrThrow<T>(res: Response): Promise<T> {
@@ -78,7 +130,10 @@ async function jsonOrThrow<T>(res: Response): Promise<T> {
 
 export const api = {
   board: () => fetch('/api/v1/board').then((r) => jsonOrThrow<BoardData>(r)),
+  state: () => fetch('/api/v1/state').then((r) => jsonOrThrow<StateSnapshot>(r)),
+  meta: () => fetch('/api/v1/meta').then((r) => jsonOrThrow<RuntimeInfo>(r)),
   states: () => fetch('/api/v1/states').then((r) => jsonOrThrow<BoardStateDTO[]>(r)),
+  labels: () => fetch('/api/v1/labels').then((r) => jsonOrThrow<LabelInfo[]>(r)),
   sessions: () =>
     fetch('/api/v1/sessions').then((r) => jsonOrThrow<{ sessions: SessionInfo[] }>(r)),
   createTicket: (form: FormData) =>
@@ -90,6 +145,12 @@ export const api = {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ stateId }),
+    }).then((r) => jsonOrThrow<{ ok: boolean }>(r)),
+  updateIssue: (id: string, edit: IssueEdit) =>
+    fetch(`/api/v1/issues/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(edit),
     }).then((r) => jsonOrThrow<{ ok: boolean }>(r)),
   issueDetail: (id: string) =>
     fetch(`/api/v1/issues/${encodeURIComponent(id)}/detail`).then((r) =>
@@ -104,6 +165,10 @@ export const api = {
   terminate: (issueId: string) =>
     fetch(`/api/v1/sessions/${encodeURIComponent(issueId)}/terminate`, { method: 'POST' }).then(
       (r) => jsonOrThrow<{ terminated: boolean }>(r),
+    ),
+  unblock: (issueId: string) =>
+    fetch(`/api/v1/sessions/${encodeURIComponent(issueId)}/unblock`, { method: 'POST' }).then((r) =>
+      jsonOrThrow<{ unblocked: boolean }>(r),
     ),
   terminateAll: () =>
     fetch('/api/v1/sessions/terminate-all', { method: 'POST' }).then((r) =>

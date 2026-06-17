@@ -4,6 +4,8 @@ export type {
   CreateIssueInput,
   BoardReader,
   IssueWriter,
+  IssuePatch,
+  LabelInfo,
   WorkflowStateInfo,
   UploadInput,
   ActivityReader,

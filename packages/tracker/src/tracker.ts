@@ -47,15 +47,36 @@ export interface WorkflowStateInfo {
   color?: string;
 }
 
-/** Read the full board (all issues + the workflow states) — operator/dashboard path. */
+/** A project label (id + name) for the operator label picker. */
+export interface LabelInfo {
+  id: string;
+  name: string;
+}
+
+/** Read the full board (all issues + the workflow states + labels) — operator/dashboard path. */
 export interface BoardReader {
   fetchAllIssues(): Promise<NormalizedIssue[]>;
   listWorkflowStates(): Promise<WorkflowStateInfo[]>;
+  listLabels(): Promise<LabelInfo[]>;
 }
 
 export function supportsBoard(t: Tracker): t is Tracker & BoardReader {
   const b = t as Partial<BoardReader>;
-  return typeof b.fetchAllIssues === 'function' && typeof b.listWorkflowStates === 'function';
+  return (
+    typeof b.fetchAllIssues === 'function' &&
+    typeof b.listWorkflowStates === 'function' &&
+    typeof b.listLabels === 'function'
+  );
+}
+
+/** Operator edits to an existing issue's metadata (omitted fields are left unchanged). */
+export interface IssuePatch {
+  title?: string;
+  description?: string;
+  /** 1=urgent..4=low; null clears priority to "none". */
+  priority?: number | null;
+  /** Full replacement set of label ids (resolved from names by the dashboard source). */
+  labelIds?: string[];
 }
 
 export interface UploadInput {
@@ -64,9 +85,11 @@ export interface UploadInput {
   data: Buffer;
 }
 
-/** Operator write capability (state moves, comments, attachments) — dashboard path. */
+/** Operator write capability (state moves, edits, comments, attachments) — dashboard path. */
 export interface IssueWriter {
   updateIssueState(issueId: string, stateId: string): Promise<void>;
+  /** Edit issue metadata (title/description/priority/labels). */
+  updateIssue(issueId: string, patch: IssuePatch): Promise<void>;
   addComment(issueId: string, body: string): Promise<void>;
   /** Upload a file to the tracker; returns the permanent asset URL. */
   uploadFile(input: UploadInput): Promise<{ assetUrl: string }>;

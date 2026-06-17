@@ -3,7 +3,9 @@ import type {
   BoardReader,
   CreateIssueInput,
   IssueCreator,
+  IssuePatch,
   IssueWriter,
+  LabelInfo,
   Tracker,
   UploadInput,
   WorkflowStateInfo,
@@ -87,11 +89,26 @@ export class MemoryTracker implements Tracker, IssueCreator, BoardReader, IssueW
     return this.states.map((s) => ({ ...s }));
   }
 
+  async listLabels(): Promise<LabelInfo[]> {
+    const names = new Set<string>();
+    for (const i of this.issues.values()) for (const l of i.labels) names.add(l);
+    return [...names].map((name) => ({ id: name, name }));
+  }
+
   // ---- IssueWriter ----
   async updateIssueState(issueId: string, stateId: string): Promise<void> {
     const issue = this.issues.get(issueId);
     if (!issue) throw new Error(`issue ${issueId} not found`);
     issue.state = stateId; // stateId === state name in memory
+  }
+
+  async updateIssue(issueId: string, patch: IssuePatch): Promise<void> {
+    const issue = this.issues.get(issueId);
+    if (!issue) throw new Error(`issue ${issueId} not found`);
+    if (patch.title !== undefined) issue.title = patch.title;
+    if (patch.description !== undefined) issue.description = patch.description;
+    if (patch.priority !== undefined) issue.priority = patch.priority;
+    if (patch.labelIds !== undefined) issue.labels = patch.labelIds; // id === name in memory
   }
 
   async addComment(issueId: string, body: string): Promise<void> {

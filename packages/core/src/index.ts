@@ -47,9 +47,11 @@ export {
 // orchestrator
 export {
   Orchestrator,
+  lastActionLabel,
   type OrchestratorDeps,
   type OrchestratorSnapshot,
   type SessionInfo,
+  type RuntimeInfo,
 } from './orchestrator/orchestrator.js';
 export {
   runWorker,
@@ -85,4 +87,5 @@ export {
   type IssueCommentDTO,
   type CreateTicketInput,
   type CreateTicketFile,
+  type IssueEditInput,
 } from './dashboard-source.js';

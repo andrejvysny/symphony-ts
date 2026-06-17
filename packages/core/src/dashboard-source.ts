@@ -4,11 +4,14 @@ import {
   supportsBoard,
   supportsIssueCreation,
   supportsIssueWriter,
+  type IssuePatch,
+  type LabelInfo,
   type Tracker,
 } from '@symphony/tracker';
 import type {
   Orchestrator,
   OrchestratorSnapshot,
+  RuntimeInfo,
   SessionInfo,
 } from './orchestrator/orchestrator.js';
 
@@ -84,17 +87,28 @@ export interface CreateTicketInput {
   files?: CreateTicketFile[];
 }
 
+/** Operator edits from the dashboard ticket modal. `labels` are names (resolved to ids here). */
+export interface IssueEditInput {
+  title?: string;
+  description?: string;
+  priority?: number | null;
+  labels?: string[];
+}
+
 /** The capability surface the dashboard consumes. */
 export interface DashboardSource {
   snapshot(): OrchestratorSnapshot;
+  runtimeInfo(): RuntimeInfo;
   findIssue(identifier: string): unknown;
   requestRefresh(): Promise<{ coalesced: boolean }>;
   capabilities(): { board: boolean; write: boolean };
   getBoard(): Promise<BoardData>;
   getIssueDetail(id: string): Promise<IssueDetailDTO | null>;
   listStates(): Promise<BoardStateDTO[]>;
+  listLabels(): Promise<LabelInfo[]>;
   createTicket(input: CreateTicketInput): Promise<{ id: string; identifier: string }>;
   moveIssue(issueId: string, stateId: string): Promise<void>;
+  updateIssue(issueId: string, edit: IssueEditInput): Promise<void>;
   addComment(issueId: string, body: string): Promise<void>;
   listSessions(): SessionInfo[];
   terminate(issueId: string): Promise<{ terminated: boolean }>;
@@ -122,6 +136,7 @@ export function buildDashboardSource(
 
   return {
     snapshot: () => orchestrator.snapshot(),
+    runtimeInfo: () => orchestrator.runtimeInfo(),
     findIssue: (identifier) => orchestrator.findIssue(identifier),
     requestRefresh: () => orchestrator.requestRefresh(),
     capabilities: () => ({ board, write: writer && creator }),
@@ -134,6 +149,11 @@ export function buildDashboardSource(
     async listStates(): Promise<BoardStateDTO[]> {
       if (!supportsBoard(tracker)) throw new Error('tracker does not support board reads');
       return tracker.listWorkflowStates();
+    },
+
+    async listLabels(): Promise<LabelInfo[]> {
+      if (!supportsBoard(tracker)) throw new Error('tracker does not support board reads');
+      return tracker.listLabels();
     },
 
     async getBoard(): Promise<BoardData> {
@@ -215,6 +235,23 @@ export function buildDashboardSource(
       if (!supportsIssueWriter(tracker)) throw new Error('tracker does not support state changes');
       await tracker.updateIssueState(issueId, stateId);
       orchestrator.resume(issueId);
+    },
+
+    async updateIssue(issueId: string, edit: IssueEditInput): Promise<void> {
+      if (!supportsIssueWriter(tracker)) throw new Error('tracker does not support edits');
+      const patch: IssuePatch = {};
+      if (edit.title !== undefined) patch.title = edit.title;
+      if (edit.description !== undefined) patch.description = edit.description;
+      if (edit.priority !== undefined) patch.priority = edit.priority;
+      if (edit.labels !== undefined) {
+        // Resolve operator-supplied label names to ids; silently drop names with no match.
+        const infos = supportsBoard(tracker) ? await tracker.listLabels() : [];
+        const byName = new Map(infos.map((l) => [l.name.toLowerCase(), l.id]));
+        patch.labelIds = edit.labels
+          .map((n) => byName.get(n.toLowerCase()))
+          .filter((id): id is string => id !== undefined);
+      }
+      await tracker.updateIssue(issueId, patch);
     },
 
     async addComment(issueId: string, body: string): Promise<void> {

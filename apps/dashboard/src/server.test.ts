@@ -47,6 +47,15 @@ function fakeSource(): DashboardSource {
   const snap = seededSnapshot();
   return {
     snapshot: () => snap,
+    runtimeInfo: () => ({
+      backend: 'claude-sdk',
+      branch_prefix: 'symphony/',
+      max_concurrent_agents: 4,
+      poll_interval_ms: 5000,
+      max_turns: 6,
+      max_continuations: 50,
+      stall_timeout_ms: 900_000,
+    }),
     findIssue: (id) => snap.running.find((r) => r.issue_identifier === id) ?? null,
     requestRefresh: vi.fn().mockResolvedValue({ coalesced: false }),
     capabilities: () => ({ board: true, write: true }),
@@ -74,9 +83,11 @@ function fakeSource(): DashboardSource {
     listStates: vi
       .fn()
       .mockResolvedValue([{ id: 's1', name: 'Todo', type: 'unstarted', position: 0 }]),
+    listLabels: vi.fn().mockResolvedValue([{ id: 'l1', name: 'docs' }]),
     getIssueDetail: vi.fn().mockResolvedValue(null),
     createTicket: vi.fn().mockResolvedValue({ id: 'new1', identifier: 'MT-9' }),
     moveIssue: vi.fn().mockResolvedValue(undefined),
+    updateIssue: vi.fn().mockResolvedValue(undefined),
     addComment: vi.fn().mockResolvedValue(undefined),
     listSessions: () => [
       {
@@ -86,9 +97,13 @@ function fakeSource(): DashboardSource {
         session_id: 's1',
         tmux_session: null,
         pid: null,
+        backend: 'claude-sdk',
         started_at: new Date(0).toISOString(),
         last_event: 'text_delta',
+        last_event_at: new Date(0).toISOString(),
+        last_action: 'Edit: index.ts',
         turn_count: 2,
+        continuation_count: 0,
         workspace_path: null,
         tokens: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
       },
@@ -145,6 +160,61 @@ describe('dashboard server', () => {
     const body = res.json();
     expect(body.counts.running).toBe(1);
     expect(body.codex_totals.total_tokens).toBe(140);
+    await app.close();
+  });
+
+  it('returns runtime meta as JSON', async () => {
+    const app = createDashboardServer(fakeSource());
+    const res = await app.inject({ method: 'GET', url: '/api/v1/meta' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      backend: 'claude-sdk',
+      branch_prefix: 'symphony/',
+      max_concurrent_agents: 4,
+      poll_interval_ms: 5000,
+      max_turns: 6,
+      max_continuations: 50,
+      stall_timeout_ms: 900_000,
+    });
+    expect((await app.inject({ method: 'POST', url: '/api/v1/meta' })).statusCode).toBe(405);
+    expect((await app.inject({ method: 'PUT', url: '/api/v1/meta' })).statusCode).toBe(405);
+    await app.close();
+  });
+
+  it('lists project labels', async () => {
+    const app = createDashboardServer(fakeSource());
+    const res = await app.inject({ method: 'GET', url: '/api/v1/labels' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual([{ id: 'l1', name: 'docs' }]);
+    await app.close();
+  });
+
+  it('edits an issue and rejects an empty edit', async () => {
+    const source = fakeSource();
+    const app = createDashboardServer(source);
+    const ok = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/issues/i1',
+      payload: { title: 'Renamed', priority: 2, labels: ['docs'] },
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(source.updateIssue).toHaveBeenCalledWith('i1', {
+      title: 'Renamed',
+      priority: 2,
+      labels: ['docs'],
+    });
+    const empty = await app.inject({ method: 'PATCH', url: '/api/v1/issues/i1', payload: {} });
+    expect(empty.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it('exposes enriched session signals', async () => {
+    const app = createDashboardServer(fakeSource());
+    const res = await app.inject({ method: 'GET', url: '/api/v1/sessions' });
+    const s = res.json().sessions[0];
+    expect(s.backend).toBe('claude-sdk');
+    expect(s.last_action).toBe('Edit: index.ts');
+    expect(s.continuation_count).toBe(0);
     await app.close();
   });
 

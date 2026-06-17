@@ -110,9 +110,14 @@ export PLANE_API_KEY=plane_api_...
 node apps/cli/dist/main.js ./WORKFLOW.md --port 4500
 ```
 
-- Symphony dashboard: <http://127.0.0.1:4500/> (board, running sessions, live agent-event log via SSE).
+- Symphony dashboard: <http://127.0.0.1:4500/> (refined-Kanban board + Agents view, ticket modal,
+  per-agent detail drawer with live agent-event log via SSE).
 - Logs stream to the terminal (pretty by default; `--json-logs` for structured).
-- JSON API: `GET /api/v1/state`, `GET /api/v1/:issueIdentifier`, `POST /api/v1/refresh`.
+- JSON API: `GET /api/v1/state`, `GET /api/v1/meta` (run constants: capacity, caps, backend),
+  `GET /api/v1/board`, `GET /api/v1/sessions` (enriched: backend, last_action, continuation_count),
+  `GET /api/v1/labels`, `GET /api/v1/:issueIdentifier`, `POST /api/v1/refresh`.
+- Issue edits (ticket modal): `PATCH /api/v1/issues/:id/state` (move) and
+  `PATCH /api/v1/issues/:id` (title/description/priority/labels; label names resolved to ids).
 - Stop with Ctrl-C (graceful shutdown).
 
 ## 6. Expected behavior
