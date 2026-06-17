@@ -120,6 +120,34 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
     },
   );
 
+  app.get<{ Params: { id: string } }>('/api/v1/issues/:id/detail', async (req, reply) => {
+    try {
+      const detail = await source.getIssueDetail(req.params.id);
+      if (!detail) return reply.code(404).send({ error: { code: 'issue_not_found' } });
+      return reply.send(detail);
+    } catch (e) {
+      return reply
+        .code(503)
+        .send({ error: { code: 'detail_unavailable', message: (e as Error).message } });
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: { body?: string } }>(
+    '/api/v1/issues/:id/comments',
+    async (req, reply) => {
+      const body = req.body?.body;
+      if (!body || !body.trim()) return reply.code(400).send({ error: { code: 'missing_body' } });
+      try {
+        await source.addComment(req.params.id, body);
+        return reply.code(201).send({ ok: true });
+      } catch (e) {
+        return reply
+          .code(502)
+          .send({ error: { code: 'comment_failed', message: (e as Error).message } });
+      }
+    },
+  );
+
   app.post<{ Params: { issueId: string } }>('/api/v1/sessions/:issueId/terminate', async (req) =>
     source.terminate(req.params.issueId),
   );

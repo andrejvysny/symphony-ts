@@ -1,15 +1,19 @@
 import { z } from 'zod';
 
-/** Default Linear workflow states for the Symphony custom flow (decision: custom states). */
+/** Default workflow states for the Symphony custom flow (decision: custom states). */
 export const DEFAULT_ACTIVE_STATES = ['Todo', 'In Progress', 'Rework', 'Merging'];
 export const DEFAULT_TERMINAL_STATES = ['Done', 'Closed', 'Canceled', 'Cancelled', 'Duplicate'];
 
 export const trackerSchema = z
   .object({
     kind: z.string(),
-    endpoint: z.string().default('https://api.linear.app/graphql'),
+    /** Tracker base URL. Required for `plane` (the local instance URL); no default. */
+    endpoint: z.string().optional(),
     api_key: z.string().optional(),
-    project_slug: z.string().optional(),
+    /** Plane: workspace slug (from the workspace URL). */
+    workspace_slug: z.string().optional(),
+    /** Plane: project UUID (from project settings). */
+    project_id: z.string().optional(),
     assignee: z.string().optional(),
     active_states: z.array(z.string()).default(DEFAULT_ACTIVE_STATES),
     terminal_states: z.array(z.string()).default(DEFAULT_TERMINAL_STATES),

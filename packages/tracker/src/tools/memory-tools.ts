@@ -17,8 +17,8 @@ function asObject(input: unknown): Record<string, unknown> | null {
 
 /**
  * Executor for an offline `set_issue_state` tool. Gives a real coding agent a way to park
- * its MemoryTracker ticket in the no-Linear dry-run — the offline parallel to the live
- * `linear_graphql` state move. Input: `{ issueId, state }` (issueId === issue.id).
+ * its MemoryTracker ticket in the no-tracker dry-run — the offline parallel to the live
+ * `tracker_api` state move. Input: `{ issueId, state }` (issueId === issue.id).
  */
 export function makeSetIssueStateExecutor(
   writer: MemoryWriter,

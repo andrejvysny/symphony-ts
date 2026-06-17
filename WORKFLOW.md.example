@@ -1,14 +1,17 @@
 ---
 # Symphony-TS workflow contract. Copy to WORKFLOW.md and customize.
 tracker:
-  kind: linear
-  # Right-click your Linear project → Copy URL; the slug is the trailing segment.
-  project_slug: "your-project-slug"
-  # Reads LINEAR_API_KEY from the environment when api_key is unset or "$LINEAR_API_KEY".
-  api_key: $LINEAR_API_KEY
-  # Symphony custom flow — set these up in Linear: Team Settings → Workflow.
+  kind: plane
+  # Local self-hosted Plane instance — start it with `pnpm plane:up` (see infra/plane/README.md).
+  endpoint: http://localhost
+  # Reads PLANE_API_KEY from the environment when api_key is unset or "$PLANE_API_KEY".
+  api_key: $PLANE_API_KEY
+  # workspace_slug: from the workspace URL `/<workspace-slug>/`. project_id: the project UUID.
+  workspace_slug: "your-workspace-slug"
+  project_id: "your-project-uuid"
+  # Symphony custom flow — configure these state names in the Plane project's workflow.
   active_states: [Todo, In Progress, Rework, Merging]
-  terminal_states: [Done, Closed, Canceled, Cancelled, Duplicate]
+  terminal_states: [Done, Cancelled]
   # Note: "Human Review" is intentionally NOT active — it parks work for a human.
 
 polling:
@@ -46,7 +49,7 @@ server:
   port: 4500                 # enables the dashboard at http://127.0.0.1:4500/
 ---
 
-You are an autonomous engineer working on Linear issue {{ issue.identifier }} in an isolated git
+You are an autonomous engineer working on Plane issue {{ issue.identifier }} in an isolated git
 worktree on branch `symphony/{{ issue.identifier }}`.
 
 Title: {{ issue.title }}
@@ -61,19 +64,18 @@ Your job:
 2. Run the project's build/tests/lints and make them pass before finishing.
 3. Commit your work to the current `symphony/{{ issue.identifier }}` branch with a concise message.
    Do NOT push or open a pull request — commits stay local for now.
-4. Move the Linear issue to "Human Review" so a human can take it from here, and post a short
-   comment summarizing what you changed. Use the `mcp__symphony__linear_graphql` tool (see below).
+4. Move the Plane issue to "Human Review" so a human can take it from here, and post a short
+   comment summarizing what you changed. Use the `mcp__symphony__tracker_api` tool (see below).
 5. If you are blocked and genuinely need a human decision, say so explicitly and stop — do not guess.
 
-You have a `mcp__symphony__linear_graphql` tool that runs ONE raw Linear GraphQL query/mutation
-with Symphony's configured auth. Linear's `issueUpdate` needs the target state's **ID (a UUID), not
-its name**, so always resolve the id first:
+You have a `mcp__symphony__tracker_api` tool that runs ONE REST call against this Plane project with
+Symphony's configured auth. Paths are relative to this project and you cannot leave it. Plane moves
+an issue by setting its **state UUID**, so resolve the id first. Call the tool once per operation:
 
-a. Look up this issue's team workflow states and find the one named "Human Review":
-   `query { issue(id: "{{ issue.id }}") { team { states { nodes { id name } } } } }`
-b. Move the issue using that id:
-   `mutation { issueUpdate(id: "{{ issue.id }}", input: { stateId: "<STATE_UUID>" }) { success } }`
-c. Post your summary:
-   `mutation { commentCreate(input: { issueId: "{{ issue.id }}", body: "..." }) { success } }`
-
-Pass each operation as a single GraphQL document; call the tool once per operation.
+a. List this project's workflow states and find the one named "Human Review":
+   `{ "method": "GET", "path": "/states/" }`
+   → in the response, find the entry whose `name` == "Human Review" and take its `id`.
+b. Move this issue to that state (note the trailing slash):
+   `{ "method": "PATCH", "path": "/work-items/{{ issue.id }}/", "body": { "state": "<STATE_UUID>" } }`
+c. Post your summary as an HTML comment:
+   `{ "method": "POST", "path": "/work-items/{{ issue.id }}/comments/", "body": { "comment_html": "<p>…</p>" } }`

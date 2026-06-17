@@ -9,9 +9,9 @@ export interface MemoryToolResult {
 export type MemoryToolExecutor = (input: unknown) => Promise<MemoryToolResult>;
 
 /**
- * Build an in-process SDK MCP server for the OFFLINE dry-run (no Linear): exposes
+ * Build an in-process SDK MCP server for the OFFLINE dry-run (no tracker): exposes
  * `set_issue_state` + `add_comment` so a real Claude agent can park its MemoryTracker
- * ticket, mirroring the live `linear_graphql` state move. Returns a FRESH server map;
+ * ticket, mirroring the live `tracker_api` state move. Returns a FRESH server map;
  * call once PER RUN (via the `McpConfig.sdkServers` factory) so concurrent agents never
  * share one server instance.
  */

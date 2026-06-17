@@ -6,20 +6,35 @@ export type {
   IssueWriter,
   WorkflowStateInfo,
   UploadInput,
+  ActivityReader,
+  IssueActivity,
+  IssueComment,
 } from './tracker.js';
-export { supportsIssueCreation, supportsBoard, supportsIssueWriter } from './tracker.js';
-export { MemoryTracker, type MemoryTrackerOptions } from './memory/memory-tracker.js';
-export { LinearTracker, type LinearTrackerOptions } from './linear/adapter.js';
-export { LinearClient, type LinearClientOptions, type GraphqlResult } from './linear/client.js';
-export { normalizeIssue, type RawLinearIssue } from './linear/normalize.js';
 export {
-  makeLinearGraphqlExecutor,
-  validateArgs,
-  type LinearGraphqlArgs,
+  supportsIssueCreation,
+  supportsBoard,
+  supportsIssueWriter,
+  supportsActivity,
+} from './tracker.js';
+export { MemoryTracker, type MemoryTrackerOptions } from './memory/memory-tracker.js';
+export { PlaneTracker, type PlaneTrackerOptions } from './plane/adapter.js';
+export { PlaneClient, type PlaneClientOptions, type RestMethod } from './plane/client.js';
+export {
+  normalizeIssue as normalizePlaneIssue,
+  planePriorityToInt,
+  intToPlanePriority,
+  type RawPlaneIssue,
+  type NormalizeContext,
+} from './plane/normalize.js';
+export {
+  makePlaneRestExecutor,
+  validateArgs as validateTrackerApiArgs,
+  type TrackerApiArgs,
   type ToolResult,
-  type GraphqlFn,
-} from './tools/linear-graphql.js';
-export { buildStdioLinearServer } from './tools/stdio-linear-server.js';
+  type RestFn,
+} from './tools/plane-rest.js';
+export { buildStdioTrackerServer } from './tools/stdio-tracker-server.js';
+export { type Transport, type TransportResponse } from './http/transport.js';
 export {
   makeSetIssueStateExecutor,
   makeAddCommentExecutor,

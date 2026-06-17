@@ -15,10 +15,38 @@ export interface BoardIssueDTO {
   labels: string[];
   url: string | null;
   status: IssueStatus;
+  createdAt: string | null;
+  updatedAt: string | null;
 }
 export interface BoardData {
   states: BoardStateDTO[];
   columns: Record<string, BoardIssueDTO[]>;
+}
+export interface IssueActivityDTO {
+  at: string;
+  field: string | null;
+  verb: string;
+  oldValue: string | null;
+  newValue: string | null;
+}
+export interface IssueCommentDTO {
+  at: string;
+  body: string;
+}
+export interface IssueDetailDTO {
+  id: string;
+  identifier: string;
+  title: string;
+  description: string | null;
+  state: string;
+  priority: number | null;
+  labels: string[];
+  url: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  status: IssueStatus;
+  activity: IssueActivityDTO[];
+  comments: IssueCommentDTO[];
 }
 export interface SessionInfo {
   issue_id: string;
@@ -62,6 +90,16 @@ export const api = {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ stateId }),
+    }).then((r) => jsonOrThrow<{ ok: boolean }>(r)),
+  issueDetail: (id: string) =>
+    fetch(`/api/v1/issues/${encodeURIComponent(id)}/detail`).then((r) =>
+      jsonOrThrow<IssueDetailDTO>(r),
+    ),
+  addComment: (id: string, body: string) =>
+    fetch(`/api/v1/issues/${encodeURIComponent(id)}/comments`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ body }),
     }).then((r) => jsonOrThrow<{ ok: boolean }>(r)),
   terminate: (issueId: string) =>
     fetch(`/api/v1/sessions/${encodeURIComponent(issueId)}/terminate`, { method: 'POST' }).then(

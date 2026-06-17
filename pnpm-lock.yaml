@@ -137,9 +137,6 @@ importers:
       '@symphony/shared':
         specifier: workspace:*
         version: link:../shared
-      graphql:
-        specifier: ^16.10.0
-        version: 16.14.0
       undici:
         specifier: ^8.3.0
         version: 8.3.0
@@ -1518,10 +1515,6 @@ packages:
   gopd@1.2.0:
     resolution: {integrity: sha512-ZUKRh6/kUFoAiTAtTYPZJ3hw9wNxx+BIBOijnlG9PnrJsCcSjs1wyyD6vJpaYtgnzDrKYRSqf3OO6Rfa93xsRg==}
     engines: {node: '>= 0.4'}
-
-  graphql@16.14.0:
-    resolution: {integrity: sha512-BBvQ/406p+4CZbTpCbVPSxfzrZrbnuWSP1ELYgyS6B+hNeKzgrdB4JczCa5VZUBQrDa9hUngm0KnexY6pJRN5Q==}
-    engines: {node: ^12.22.0 || ^14.16.0 || ^16.0.0 || >=17.0.0}
 
   has-flag@4.0.0:
     resolution: {integrity: sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ==}
@@ -3821,8 +3814,6 @@ snapshots:
   globals@14.0.0: {}
 
   gopd@1.2.0: {}
-
-  graphql@16.14.0: {}
 
   has-flag@4.0.0: {}
 

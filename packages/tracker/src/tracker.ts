@@ -77,3 +77,35 @@ export function supportsIssueWriter(t: Tracker): t is Tracker & IssueWriter {
   const w = t as Partial<IssueWriter>;
   return typeof w.updateIssueState === 'function' && typeof w.uploadFile === 'function';
 }
+
+/** A single change in an issue's history (created, state move, field edit, …). */
+export interface IssueActivity {
+  /** ISO timestamp of the change. */
+  at: string;
+  /** The changed field (e.g. `state`), or null for create/non-field events. */
+  field: string | null;
+  /** `created` | `updated` | `deleted` | … */
+  verb: string;
+  oldValue: string | null;
+  newValue: string | null;
+}
+
+/** A comment on an issue. */
+export interface IssueComment {
+  at: string;
+  /** Plain-text comment body. */
+  body: string;
+}
+
+/** Read an issue's change history + comments (operator/detail path). */
+export interface ActivityReader {
+  /** Chronological (oldest-first) change history for an issue. */
+  fetchActivity(issueId: string): Promise<IssueActivity[]>;
+  /** Chronological (oldest-first) comments for an issue. */
+  fetchComments(issueId: string): Promise<IssueComment[]>;
+}
+
+export function supportsActivity(t: Tracker): t is Tracker & ActivityReader {
+  const a = t as Partial<ActivityReader>;
+  return typeof a.fetchActivity === 'function' && typeof a.fetchComments === 'function';
+}

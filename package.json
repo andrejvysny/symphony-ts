@@ -15,7 +15,11 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "typecheck": "pnpm -r exec tsc --noEmit"
+    "typecheck": "pnpm -r exec tsc --noEmit",
+    "plane:up": "docker compose --env-file infra/plane/plane.env -f infra/plane/docker-compose.yml up -d",
+    "plane:down": "docker compose --env-file infra/plane/plane.env -f infra/plane/docker-compose.yml down",
+    "plane:ps": "docker compose --env-file infra/plane/plane.env -f infra/plane/docker-compose.yml ps",
+    "plane:logs": "docker compose --env-file infra/plane/plane.env -f infra/plane/docker-compose.yml logs -f"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

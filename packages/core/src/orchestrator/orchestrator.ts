@@ -29,7 +29,7 @@ export interface OrchestratorDeps {
   config: SymphonyConfig;
   promptBuilder?: PromptBuilder;
   logger?: Logger;
-  /** MCP servers (e.g. linear_graphql) passed to every agent run. */
+  /** MCP servers (e.g. tracker_api) passed to every agent run. */
   mcpConfig?: McpConfig;
   /** Hot-reload hook: returns the latest config + prompt body, or null to keep current. */
   reload?: () => { config: SymphonyConfig; promptBody: string } | null;

@@ -1,5 +1,6 @@
 import type { AgentEvent } from '@symphony/agent-backends';
 import {
+  supportsActivity,
   supportsBoard,
   supportsIssueCreation,
   supportsIssueWriter,
@@ -30,6 +31,38 @@ export interface BoardIssueDTO {
   labels: string[];
   url: string | null;
   status: IssueStatus;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface IssueActivityDTO {
+  at: string;
+  field: string | null;
+  verb: string;
+  oldValue: string | null;
+  newValue: string | null;
+}
+
+export interface IssueCommentDTO {
+  at: string;
+  body: string;
+}
+
+/** Full ticket detail for the dashboard detail view: issue + history + comments + live status. */
+export interface IssueDetailDTO {
+  id: string;
+  identifier: string;
+  title: string;
+  description: string | null;
+  state: string;
+  priority: number | null;
+  labels: string[];
+  url: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  status: IssueStatus;
+  activity: IssueActivityDTO[];
+  comments: IssueCommentDTO[];
 }
 
 export interface BoardData {
@@ -58,9 +91,11 @@ export interface DashboardSource {
   requestRefresh(): Promise<{ coalesced: boolean }>;
   capabilities(): { board: boolean; write: boolean };
   getBoard(): Promise<BoardData>;
+  getIssueDetail(id: string): Promise<IssueDetailDTO | null>;
   listStates(): Promise<BoardStateDTO[]>;
   createTicket(input: CreateTicketInput): Promise<{ id: string; identifier: string }>;
   moveIssue(issueId: string, stateId: string): Promise<void>;
+  addComment(issueId: string, body: string): Promise<void>;
   listSessions(): SessionInfo[];
   terminate(issueId: string): Promise<{ terminated: boolean }>;
   terminateAll(): Promise<{ terminated: number }>;
@@ -120,10 +155,36 @@ export function buildDashboardSource(
           labels: i.labels,
           url: i.url,
           status: statusOf(i.id, snap),
+          createdAt: i.createdAt,
+          updatedAt: i.updatedAt,
         };
         (columns[i.state] ??= []).push(dto);
       }
       return { states, columns };
+    },
+
+    async getIssueDetail(id: string): Promise<IssueDetailDTO | null> {
+      if (!supportsBoard(tracker)) throw new Error('tracker does not support board reads');
+      const issue = (await tracker.fetchAllIssues()).find((i) => i.id === id);
+      if (!issue) return null;
+      const [activity, comments] = supportsActivity(tracker)
+        ? await Promise.all([tracker.fetchActivity(id), tracker.fetchComments(id)])
+        : [[], []];
+      return {
+        id: issue.id,
+        identifier: issue.identifier,
+        title: issue.title,
+        description: issue.description,
+        state: issue.state,
+        priority: issue.priority,
+        labels: issue.labels,
+        url: issue.url,
+        createdAt: issue.createdAt,
+        updatedAt: issue.updatedAt,
+        status: statusOf(issue.id, orchestrator.snapshot()),
+        activity,
+        comments,
+      };
     },
 
     async createTicket(input: CreateTicketInput): Promise<{ id: string; identifier: string }> {
@@ -154,6 +215,11 @@ export function buildDashboardSource(
       if (!supportsIssueWriter(tracker)) throw new Error('tracker does not support state changes');
       await tracker.updateIssueState(issueId, stateId);
       orchestrator.resume(issueId);
+    },
+
+    async addComment(issueId: string, body: string): Promise<void> {
+      if (!supportsIssueWriter(tracker)) throw new Error('tracker does not support comments');
+      await tracker.addComment(issueId, body);
     },
   };
 }

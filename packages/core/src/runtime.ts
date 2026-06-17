@@ -1,15 +1,15 @@
 import { createRequire } from 'node:module';
 import {
-  buildLinearSdkMcpServer,
+  buildTrackerSdkMcpServer,
   createBackend,
   type CodingAgentBackend,
   type McpConfig,
 } from '@symphony/agent-backends';
 import {
-  LinearClient,
-  LinearTracker,
-  makeLinearGraphqlExecutor,
   MemoryTracker,
+  PlaneClient,
+  PlaneTracker,
+  makePlaneRestExecutor,
   type Tracker,
 } from '@symphony/tracker';
 import { ConfigError } from '@symphony/shared';
@@ -24,13 +24,16 @@ export function buildTracker(config: SymphonyConfig): Tracker {
       terminalStates: t.terminal_states,
     });
   }
-  if (t.kind === 'linear') {
-    if (!t.api_key) throw new ConfigError('tracker.api_key required for linear');
-    if (!t.project_slug) throw new ConfigError('tracker.project_slug required for linear');
-    return new LinearTracker({
+  if (t.kind === 'plane') {
+    if (!t.api_key) throw new ConfigError('tracker.api_key required for plane');
+    if (!t.endpoint) throw new ConfigError('tracker.endpoint required for plane');
+    if (!t.workspace_slug) throw new ConfigError('tracker.workspace_slug required for plane');
+    if (!t.project_id) throw new ConfigError('tracker.project_id required for plane');
+    return new PlaneTracker({
       endpoint: t.endpoint,
       apiKey: t.api_key,
-      projectSlug: t.project_slug,
+      workspaceSlug: t.workspace_slug,
+      projectId: t.project_id,
       activeStates: t.active_states,
     });
   }
@@ -49,36 +52,45 @@ export function buildWorkspaceManager(config: SymphonyConfig): WorkspaceManager 
 }
 
 /**
- * Build the MCP config exposing `linear_graphql` to the agent. The in-process Claude
- * SDK backend gets an SDK MCP server; CLI backends get a stdio server launch spec
- * (`node .../stdio-linear-server.js`) loaded via `--mcp-config`. Both paths share the
- * same transport-neutral executor, so validation/auth are identical.
+ * Build the MCP config exposing `tracker_api` to the agent. The in-process Claude SDK backend
+ * gets an SDK MCP server; CLI backends get a stdio server launch spec
+ * (`node .../stdio-tracker-server.js`) loaded via `--mcp-config`. Both paths share the same
+ * transport-neutral, path-confined executor, so validation/auth are identical.
  */
 export function buildMcpConfig(config: SymphonyConfig): McpConfig | undefined {
-  if (config.tracker.kind !== 'linear' || !config.tracker.api_key) return undefined;
-  const apiKey = config.tracker.api_key;
-  const endpoint = config.tracker.endpoint;
+  const t = config.tracker;
+  if (t.kind !== 'plane' || !t.api_key || !t.endpoint || !t.workspace_slug || !t.project_id)
+    return undefined;
+  const apiKey = t.api_key;
+  const endpoint = t.endpoint;
+  const workspaceSlug = t.workspace_slug;
+  const projectId = t.project_id;
 
   if (config.agent.backend === 'claude-sdk') {
-    const client = new LinearClient({ endpoint, apiKey });
-    const executor = makeLinearGraphqlExecutor((q, v) => client.graphql(q, v));
+    const client = new PlaneClient({ endpoint, apiKey, workspaceSlug, projectId });
+    const executor = makePlaneRestExecutor((m, p, b) => client.request(m, p, b));
     // Factory (not a prebuilt instance): the SDK backend rebuilds the server per run so
     // concurrent agents never share one MCP server instance. The executor is stateless.
-    return { sdkServers: () => buildLinearSdkMcpServer(executor) };
+    return { sdkServers: () => buildTrackerSdkMcpServer(executor) };
   }
 
-  // CLI backends load MCP servers via `--mcp-config`: spawn the standalone stdio server
-  // that exposes the same `linear_graphql` tool. (Consumed by claude-cli today; codex/
-  // opencode flag wiring is a follow-up.)
+  // CLI backends load MCP servers via `--mcp-config`: spawn the standalone stdio server that
+  // exposes the same `tracker_api` tool. (Consumed by claude-cli today; codex/opencode flag
+  // wiring is a follow-up.)
   const serverPath = createRequire(import.meta.url).resolve(
-    '@symphony/tracker/stdio-linear-server',
+    '@symphony/tracker/stdio-tracker-server',
   );
   return {
     stdioServers: {
       symphony: {
         command: process.execPath,
         args: [serverPath],
-        env: { LINEAR_API_KEY: apiKey, SYMPHONY_LINEAR_ENDPOINT: endpoint },
+        env: {
+          PLANE_API_KEY: apiKey,
+          PLANE_ENDPOINT: endpoint,
+          PLANE_WORKSPACE_SLUG: workspaceSlug,
+          PLANE_PROJECT_ID: projectId,
+        },
       },
     },
   };

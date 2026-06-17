@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['src/index.ts', 'src/tools/stdio-linear-server.ts'],
+  entry: ['src/index.ts', 'src/tools/stdio-tracker-server.ts'],
   format: ['esm'],
   dts: true,
   clean: true,

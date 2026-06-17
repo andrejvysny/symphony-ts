@@ -28,7 +28,7 @@ export function makeIssue(partial: Partial<NormalizedIssue> & { id: string }): N
 
 export function testConfig(overrides: Record<string, unknown> = {}): SymphonyConfig {
   const raw = {
-    tracker: { kind: 'memory', project_slug: 'test', ...((overrides['tracker'] as object) ?? {}) },
+    tracker: { kind: 'memory', ...((overrides['tracker'] as object) ?? {}) },
     workspace: {
       repo: '/tmp/fake-repo',
       root: '/tmp/fake-ws',

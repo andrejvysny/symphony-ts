@@ -80,6 +80,9 @@ export {
   type BoardStateDTO,
   type BoardIssueDTO,
   type IssueStatus,
+  type IssueDetailDTO,
+  type IssueActivityDTO,
+  type IssueCommentDTO,
   type CreateTicketInput,
   type CreateTicketFile,
 } from './dashboard-source.js';

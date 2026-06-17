@@ -33,10 +33,10 @@ export { resultFromEvents, type ParseCtx } from './cli-stream-json/parsers/commo
 
 // MCP tool wiring
 export {
-  buildLinearSdkMcpServer,
-  type LinearGraphqlExecutor,
-  type LinearToolResult,
-} from './mcp/sdk-linear-tool.js';
+  buildTrackerSdkMcpServer,
+  type TrackerApiExecutor,
+  type TrackerToolResult,
+} from './mcp/sdk-tracker-tool.js';
 export {
   buildMemorySdkMcpServer,
   type MemoryToolExecutor,

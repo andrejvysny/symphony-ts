@@ -1,8 +1,9 @@
 # Symphony-TS
 
 Agent-agnostic coding-agent orchestrator — a TypeScript reimplementation of [Symphony](../SPEC.md).
-Create tickets in Linear; Symphony-TS auto-delegates each to a **local Claude Code** agent running in
-an isolated git worktree, keeping it working until the ticket reaches a terminal state.
+Create tickets in a **local, self-hosted [Plane](https://plane.so)** instance; Symphony-TS
+auto-delegates each to a **local Claude Code** agent running in an isolated git worktree, keeping it
+working until the ticket reaches a terminal state. No SaaS — tracker and agent both run on your machine.
 
 v1 targets Claude Code but is **agent-agnostic**: Codex CLI, opencode, and others plug in behind one
 `CodingAgentBackend` interface (hybrid — Claude Agent SDK for Claude, CLI stream-json for the rest).
@@ -15,7 +16,7 @@ v1 targets Claude Code but is **agent-agnostic**: Codex CLI, opencode, and other
 ```
 packages/
   shared/         # cross-package types (NormalizedIssue, Result, errors)
-  tracker/        # Tracker interface + Linear adapter + in-memory mock
+  tracker/        # Tracker interface + Plane (REST) adapter + in-memory mock
   agent-backends/ # CodingAgentBackend interface + Claude SDK / CLI stream-json backends
   core/           # orchestrator, config, workflow, prompt, workspace, observability
 apps/
@@ -38,10 +39,12 @@ pnpm format        # prettier --write
 
 ## Run
 
-1. Set up Linear: create a personal API key (Settings → Security & access) and export it:
-   `export LINEAR_API_KEY=lin_api_...`. For the Symphony custom flow, add the `Rework`,
-   `Human Review`, and `Merging` states in Team Settings → Workflow.
-2. Copy `WORKFLOW.md.example` to `WORKFLOW.md` and set `tracker.project_slug` + `workspace.repo`.
+1. Start a **local Plane** instance: `pnpm plane:up` (Docker Compose; see `infra/plane/README.md`).
+   Open <http://localhost>, create a Workspace + Project, add the Symphony workflow states (`Todo`,
+   `In Progress`, `Rework`, `Merging`, `Human Review`, `Done`, `Cancelled`), then create a Personal
+   Access Token and export it: `export PLANE_API_KEY=plane_api_...`.
+2. Copy `WORKFLOW.md.example` to `WORKFLOW.md` and set `tracker.workspace_slug`, `tracker.project_id`
+   (the project UUID), and `workspace.repo`.
 3. Build and run:
 
 ```bash
@@ -64,8 +67,8 @@ symphony --help
 symphony ./WORKFLOW.md --port 4500
 ```
 
-Agent auth uses your existing local `claude` login (`~/.claude`). The agent moves tickets and opens
-PRs itself via the `linear_graphql` tool; the orchestrator only reads ticket state.
+Agent auth uses your existing local `claude` login (`~/.claude`). The agent moves tickets and posts
+comments itself via the confined `tracker_api` REST tool; the orchestrator only reads ticket state.
 
 > The dashboard has **no authentication** — keep `server.host` on loopback (`127.0.0.1`). Binding to
 > a public host logs a warning and exposes the API to the network.

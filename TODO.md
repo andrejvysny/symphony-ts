@@ -2,6 +2,26 @@
 
 Plan: `~/.claude/plans/act-as-senior-ai-smooth-umbrella.md`
 
+## Tracker migration → self-hosted Plane (DONE)
+
+Migrated off Linear Cloud to a **local, Docker-hosted Plane CE** instance (no SaaS). Plan:
+`~/.claude/plans/act-as-senior-software-whimsical-mccarthy.md`.
+
+- [x] Config: `trackerSchema` plane fields (`workspace_slug`/`project_id`), `PLANE_API_KEY` env
+      fallback, plane `dispatchPreflight` branch; `endpoint` no longer Linear-defaulted.
+- [x] `PlaneClient` (REST, `X-API-Key`, retry/backoff, cursor+flat pagination) on a shared
+      `http/transport.ts`; `PlaneTracker` + `normalize.ts` (UUID→name joins, priority map, `blockedBy:[]`).
+- [x] Agent tool `linear_graphql` → **`tracker_api`** (confined REST passthrough) + stdio + SDK MCP
+      servers; runtime `buildTracker`/`buildMcpConfig` plane branches.
+- [x] WORKFLOW.md + .example rewritten (plane front-matter + REST prompt ops on `/work-items/`).
+- [x] **Linear fully removed** (adapter/client/queries/tools + tests; `graphql` dep dropped).
+- [x] Local Plane via `infra/plane/` (`pnpm plane:up`/`down`); docs (README/RUNBOOK/CLAUDE) updated.
+- [x] Gate green: 197 tests, typecheck, lint, format. No `linear.app` at runtime.
+- [x] **Live e2e** (local Plane + local Claude Code): a Todo ticket was dispatched, the agent
+      committed and moved it to "Human Review" via `tracker_api`; state move + comment verified.
+
+> The Linear-specific items below are historical, superseded by the Plane migration.
+
 ## Phase 0 — Baseline & checkpoint
 
 - [x] Gates green on current tree (build/test/typecheck/lint/format all pass)

@@ -5,7 +5,7 @@ authoritative behavioral contract and `../CLAUDE.md` for the repo overview.
 
 ## What this is
 
-An agent-agnostic orchestrator: polls Linear, gives each ticket an isolated **git worktree**, and
+An agent-agnostic orchestrator: polls a **local self-hosted Plane** instance, gives each ticket an isolated **git worktree**, and
 runs a **local coding agent** (Claude Code by default) until the ticket reaches a terminal state.
 v1 ships two backends behind one `CodingAgentBackend` interface — Claude Agent SDK and a CLI
 stream-json family (claude/codex/opencode).
@@ -34,8 +34,10 @@ stream-json family (claude/codex/opencode).
   CLI agent under a tmux session (`tmux.ts` = injectable `TmuxController`), `tee`s raw stdout to a
   `run.jsonl` log it tails, and emits a `process_started` event (pid + session name). tmux ownership
   lives entirely here — the orchestrator only records the session name and aborts (abort → kill).
-- `packages/tracker` — `Tracker` interface, `LinearTracker` (read-mostly + `createIssue`), `MemoryTracker`
-  (tests), and the shared `linear_graphql` tool executor.
+- `packages/tracker` — `Tracker` interface, `PlaneTracker` (REST adapter over a local self-hosted
+  Plane; read-mostly + `createIssue`), `MemoryTracker` (tests), `PlaneClient` (retry/backoff REST
+  transport in `http/transport.ts`), and the shared `tracker_api` tool executor (a **path-confined
+  REST passthrough** to the configured project). Plane runs locally via `infra/plane/` (`pnpm plane:up`).
 - `packages/core/src/workspace` — git worktrees off one shared clone, hooks, path-safety invariants.
 - `packages/core/src/config` + `workflow` — zod schema, `$VAR`/`~` resolution, WorkflowStore hot-reload
   (1s stat-poll, last-known-good on bad reload).
@@ -56,7 +58,9 @@ stream-json family (claude/codex/opencode).
 ## Invariants (do not break)
 
 - Agent cwd must equal the worktree path; worktree must stay under `workspace.root` (path-safety).
-- Tracker is read-only from the orchestrator — the agent moves tickets via `linear_graphql`.
+- Tracker is read-only from the orchestrator — the agent moves tickets via the `tracker_api` REST tool.
+- Plane has no public issue-relations endpoint, so `blockedBy` is always `[]` (auto-skip disabled); the
+  orchestrator compares state **names** while Plane mutates by state **UUID** (the adapter joins them).
 - Token accounting uses absolute totals only (delta = max(0, next − lastReported)).
 - Workspaces/branches are preserved after success; cleaned only when the issue goes terminal. A
   turn that ends with the issue already terminal is cleaned up immediately (no continuation).

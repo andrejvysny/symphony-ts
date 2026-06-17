@@ -74,8 +74,10 @@ function fakeSource(): DashboardSource {
     listStates: vi
       .fn()
       .mockResolvedValue([{ id: 's1', name: 'Todo', type: 'unstarted', position: 0 }]),
+    getIssueDetail: vi.fn().mockResolvedValue(null),
     createTicket: vi.fn().mockResolvedValue({ id: 'new1', identifier: 'MT-9' }),
     moveIssue: vi.fn().mockResolvedValue(undefined),
+    addComment: vi.fn().mockResolvedValue(undefined),
     listSessions: () => [
       {
         issue_id: 'r1',

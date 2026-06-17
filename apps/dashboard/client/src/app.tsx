@@ -4,8 +4,35 @@ import {
   type BoardData,
   type BoardIssueDTO,
   type BoardStateDTO,
+  type IssueActivityDTO,
+  type IssueDetailDTO,
   type SessionInfo,
 } from './api.js';
+
+function fmt(iso?: string | null): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString();
+}
+
+function fmtShort(iso?: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function describeActivity(a: IssueActivityDTO): string {
+  if (a.verb === 'created' && !a.field) return 'created the ticket';
+  if (a.field === 'state') return `state: ${a.oldValue ?? '∅'} → ${a.newValue ?? '∅'}`;
+  if (a.field) return `${a.field}: ${a.oldValue ?? '∅'} → ${a.newValue ?? '∅'}`;
+  return a.verb;
+}
 
 export function App() {
   const [board, setBoard] = useState<BoardData | null>(null);
@@ -13,6 +40,7 @@ export function App() {
   const [showCreate, setShowCreate] = useState(false);
   const [showSessions, setShowSessions] = useState(false);
   const [logIssue, setLogIssue] = useState<{ id: string; identifier: string } | null>(null);
+  const [selected, setSelected] = useState<BoardIssueDTO | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -60,7 +88,13 @@ export function App() {
 
       <div class="board" data-test="board">
         {states.map((s) => (
-          <Column key={s.id} state={s} issues={board?.columns[s.name] ?? []} onDrop={move} />
+          <Column
+            key={s.id}
+            state={s}
+            issues={board?.columns[s.name] ?? []}
+            onDrop={move}
+            onOpen={setSelected}
+          />
         ))}
       </div>
 
@@ -80,6 +114,15 @@ export function App() {
       )}
 
       {logIssue && <LogConsole issue={logIssue} onClose={() => setLogIssue(null)} />}
+
+      {selected && (
+        <TicketDetail
+          issue={selected}
+          states={states}
+          onClose={() => setSelected(null)}
+          onChanged={() => void refresh()}
+        />
+      )}
     </div>
   );
 }
@@ -88,6 +131,7 @@ function Column(props: {
   state: BoardStateDTO;
   issues: BoardIssueDTO[];
   onDrop: (issueId: string, stateId: string) => void;
+  onOpen: (issue: BoardIssueDTO) => void;
 }) {
   const [over, setOver] = useState(false);
   return (
@@ -112,20 +156,22 @@ function Column(props: {
       </h2>
       {props.issues.length === 0 && <div class="empty">none</div>}
       {props.issues.map((i) => (
-        <Card key={i.id} issue={i} />
+        <Card key={i.id} issue={i} onOpen={props.onOpen} />
       ))}
     </section>
   );
 }
 
-function Card(props: { issue: BoardIssueDTO }) {
+function Card(props: { issue: BoardIssueDTO; onOpen: (issue: BoardIssueDTO) => void }) {
   const i = props.issue;
+  const ts = i.updatedAt ?? i.createdAt;
   return (
     <div
       class="card"
       data-test="card"
       data-issue={i.id}
       draggable
+      onClick={() => props.onOpen(i)}
       onDragStart={(e) => e.dataTransfer?.setData('text/plain', i.id)}
     >
       <div class="id">{i.identifier}</div>
@@ -138,6 +184,7 @@ function Card(props: { issue: BoardIssueDTO }) {
         )}
         {i.priority !== null && <span class="badge">P{i.priority}</span>}
       </div>
+      {ts && <div class="ts">upd {fmtShort(ts)}</div>}
     </div>
   );
 }
@@ -342,6 +389,145 @@ function LogConsole(props: { issue: { id: string; identifier: string }; onClose:
         </div>
         <div class="actions">
           <button onClick={props.onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TicketDetail(props: {
+  issue: BoardIssueDTO;
+  states: BoardStateDTO[];
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const [detail, setDetail] = useState<IssueDetailDTO | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [comment, setComment] = useState('');
+  const [busy, setBusy] = useState(false);
+  const i = props.issue;
+
+  const load = useCallback(async () => {
+    try {
+      setDetail(await api.issueDetail(i.id));
+      setErr(null);
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  }, [i.id]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const move = async (stateId: string) => {
+    setBusy(true);
+    try {
+      await api.moveIssue(i.id, stateId);
+      await load();
+      props.onChanged();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitComment = async () => {
+    if (!comment.trim()) return;
+    setBusy(true);
+    try {
+      await api.addComment(i.id, comment);
+      setComment('');
+      await load();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const labels = detail?.labels ?? i.labels;
+  const currentState = detail?.state ?? i.state;
+
+  return (
+    <div class="overlay" onClick={props.onClose}>
+      <div class="modal detail" data-test="ticket-detail" onClick={(e) => e.stopPropagation()}>
+        <h3>
+          <span class="id">{i.identifier}</span> {i.title}
+        </h3>
+
+        <div class="detail-meta">
+          <label class="inline">
+            State{' '}
+            <select
+              data-test="detail-state"
+              disabled={busy}
+              value={currentState}
+              onChange={(e) => {
+                const name = (e.target as HTMLSelectElement).value;
+                const st = props.states.find((s) => s.name === name);
+                if (st && st.name !== currentState) void move(st.id);
+              }}
+            >
+              {props.states.map((s) => (
+                <option key={s.id} value={s.name}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          {i.priority !== null && <span class="badge">P{i.priority}</span>}
+          {labels.map((l) => (
+            <span class="badge" key={l}>
+              {l}
+            </span>
+          ))}
+          {i.url && (
+            <a class="muted" href={i.url} target="_blank" rel="noreferrer">
+              open in Plane ↗
+            </a>
+          )}
+        </div>
+        <p class="muted">
+          Created {fmt(detail?.createdAt)} · Updated {fmt(detail?.updatedAt)}
+        </p>
+
+        {err && <div class="err-banner">{err}</div>}
+        {detail?.description && <div class="desc">{detail.description}</div>}
+
+        <h4>History</h4>
+        <div class="timeline" data-test="detail-history">
+          {!detail && <div class="empty">loading…</div>}
+          {detail && detail.activity.length === 0 && <div class="empty">no activity</div>}
+          {detail?.activity.map((a, n) => (
+            <div class="event" key={n}>
+              <span class="when">{fmt(a.at)}</span>
+              <span class="what">{describeActivity(a)}</span>
+            </div>
+          ))}
+        </div>
+
+        <h4>Comments</h4>
+        <div class="comments">
+          {detail && detail.comments.length === 0 && <div class="empty">no comments</div>}
+          {detail?.comments.map((c, n) => (
+            <div class="comment" key={n}>
+              <div class="muted">{fmt(c.at)}</div>
+              <div>{c.body}</div>
+            </div>
+          ))}
+        </div>
+        <textarea
+          data-test="detail-comment"
+          placeholder="Add a comment…"
+          value={comment}
+          onInput={(e) => setComment((e.target as HTMLTextAreaElement).value)}
+        />
+        <div class="actions">
+          <button onClick={props.onClose}>Close</button>
+          <button class="primary" disabled={busy || !comment.trim()} onClick={submitComment}>
+            Comment
+          </button>
         </div>
       </div>
     </div>

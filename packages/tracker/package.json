@@ -8,9 +8,9 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./stdio-linear-server": {
-      "types": "./dist/tools/stdio-linear-server.d.ts",
-      "import": "./dist/tools/stdio-linear-server.js"
+    "./stdio-tracker-server": {
+      "types": "./dist/tools/stdio-tracker-server.d.ts",
+      "import": "./dist/tools/stdio-tracker-server.js"
     }
   },
   "main": "./dist/index.js",
@@ -23,7 +23,6 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@symphony/shared": "workspace:*",
-    "graphql": "^16.10.0",
     "undici": "^8.3.0",
     "zod": "^4.4.3"
   }
