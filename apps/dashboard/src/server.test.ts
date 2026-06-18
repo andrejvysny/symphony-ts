@@ -126,6 +126,7 @@ function fakeSource(): DashboardSource {
     listLabels: vi.fn().mockResolvedValue([{ id: 'l1', name: 'docs' }]),
     getIssueDetail: vi.fn().mockResolvedValue(null),
     createTicket: vi.fn().mockResolvedValue({ id: 'new1', identifier: 'MT-9' }),
+    resolveUpload: () => null,
     moveIssue: vi.fn().mockResolvedValue(undefined),
     updateIssue: vi.fn().mockResolvedValue(undefined),
     addComment: vi.fn().mockResolvedValue(undefined),

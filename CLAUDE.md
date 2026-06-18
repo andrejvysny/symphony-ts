@@ -5,19 +5,23 @@ authoritative behavioral contract and `../CLAUDE.md` for the repo overview.
 
 ## What this is
 
-An agent-agnostic orchestrator: polls a **local self-hosted Plane** instance, gives each ticket an isolated **git worktree**, and
-runs a **local coding agent** (Claude Code by default) until the ticket reaches a terminal state.
-v1 ships two backends behind one `CodingAgentBackend` interface — Claude Agent SDK and a CLI
-stream-json family (claude/codex/opencode).
+An agent-agnostic orchestrator: polls a **local file-based task store** (`~/.symphony`, plain JSON —
+no Docker, no database, no external services, no auth), gives each ticket an isolated **git
+worktree**, and runs a **local coding agent** (Claude Code by default) until the ticket reaches a
+terminal state. A single-user local app for delegating tasks to coding agents. v1 ships two backends
+behind one `CodingAgentBackend` interface — Claude Agent SDK and a CLI stream-json family
+(claude/codex/opencode).
 
 ## Commands (run from this directory)
 
-- `pnpm install` — deps (Node ≥ 22, pnpm)
-- `pnpm build` — tsup, all packages (build deps before typechecking a dependent package)
+- `pnpm install` — deps (Node ≥ 22, pnpm@10)
+- `pnpm build` — tsup, all packages (build deps before typechecking a dependent package; the
+  dashboard build is `tsup && vite build`, so its Preact client is bundled by `pnpm build` too)
 - `pnpm test` — vitest, all packages
-- `pnpm typecheck` / `pnpm lint` / `pnpm format` — gates
+- Gates (CI runs them in this order): `pnpm build && pnpm test && pnpm typecheck && pnpm lint && pnpm format:check`.
+  `pnpm format` writes; `pnpm format:check` is the gate.
 - Single test file: `pnpm --filter @symphony/core exec vitest run src/orchestrator/orchestrator.test.ts`
-- Run it: `node apps/cli/dist/main.js ./WORKFLOW.md --port 4500` (after build), or `symphony ticket create "<title>"`
+- Run it: `node apps/cli/dist/main.js ./WORKFLOW.md --port 4500` (after build), or `symphony ticket create "<title>" [--desc --state --priority]`. No services to start — state lives in `~/.symphony`.
 
 ## Architecture (the load-bearing parts)
 
@@ -34,12 +38,13 @@ stream-json family (claude/codex/opencode).
   CLI agent under a tmux session (`tmux.ts` = injectable `TmuxController`), `tee`s raw stdout to a
   `run.jsonl` log it tails, and emits a `process_started` event (pid + session name). tmux ownership
   lives entirely here — the orchestrator only records the session name and aborts (abort → kill).
-- `packages/tracker` — `Tracker` interface, `PlaneTracker` (REST adapter over a local self-hosted
-  Plane; read-mostly + `createIssue`), `MemoryTracker` (tests), `PlaneClient` (retry/backoff REST
-  transport in `http/transport.ts`), and the agent-facing tracker tools: the semantic
-  `tracker_get_task`/`tracker_update_status`/`tracker_add_comment` executors (`tools/plane-semantic.ts`,
-  shared by the SDK + stdio MCP servers) plus an opt-in raw `tracker_api` passthrough
-  (`tools/plane-rest.ts`, **path-confined**). Plane runs locally via `infra/plane/` (`pnpm plane:up`).
+- `packages/tracker` — `Tracker` interface, `FileTracker` (the default; per-issue JSON store under
+  `<data_root>/projects/<projectKey>/`, in `file/{store,adapter}.ts`), `MemoryTracker` (tests), and
+  the agent-facing semantic tracker tools `tracker_get_task`/`tracker_update_status`/
+  `tracker_add_comment` (`tools/file-semantic.ts`, shared by the SDK MCP server + the stdio bridge
+  client). `file/store.ts` does atomic temp+rename writes and a **process-wide per-file async mutex**
+  (keyed by absolute path) so the orchestrator's tracker and the SDK MCP executors' tracker serialize.
+  `meta.json` is the single source of truth for issue ids (`<IDENTIFIER>-<seq>`).
 - `packages/core/src/workspace` — git worktrees off one shared clone, hooks, path-safety invariants.
 - `packages/core/src/config` + `workflow` — zod schema, `$VAR`/`~` resolution, WorkflowStore hot-reload
   (1s stat-poll, last-known-good on bad reload).
@@ -47,12 +52,25 @@ stream-json family (claude/codex/opencode).
   the `claude_code` preset on every turn; override via `agent.system_prompt`) + `builder.ts` (renders
   the per-issue `WORKFLOW.md` body via Liquid, plus continuation guidance). `agent.effort`/
   `agent.thinking` tune reasoning depth.
-- `apps/dashboard` — fastify JSON API (`/api/v1/state|:id|refresh`) + the HTML board view.
+- `apps/dashboard` — fastify JSON API (`src/server.ts`) + a **Preact + Vite SPA** (`client/`: kanban
+  `board`, `projects` switcher, `settings`, `agents`, `modals`) served from `dist`. Routes are read
+  endpoints (`/api/v1/state|meta|capabilities|projects|settings|board|states|labels|sessions`) plus a
+  few writes (`POST /api/v1/tickets`, `sessions/terminate-all`, `refresh`). The board can **live-switch
+  the active project**: the CLI passes `trackerFactory`/`mcpConfigFactory`/`workspaceManagerFactory` to
+  the orchestrator so `Orchestrator.switchProject(config)` atomically rebuilds tracker/MCP/workspace
+  without a restart.
+- `packages/core/src/tracker-bridge.ts` — a loopback **Unix-socket bridge** the CLI starts for the
+  file tracker. Out-of-process CLI agents (claude-cli/codex/opencode) drive the tracker through it so
+  the orchestrator process stays the **single writer** of the file store (no cross-process locking).
+  The in-process SDK backend skips the bridge and calls the executors directly.
+- `packages/core/src/observability` — `createLogger` (pino; pretty by default, `--json-logs` for JSON).
 
 ## Conventions
 
 - TS strict (`exactOptionalPropertyTypes` — never assign `undefined` to optional props; spread them
-  conditionally: `...(x !== undefined ? { x } : {})`). ESM `NodeNext` — relative imports end in `.js`.
+  conditionally: `...(x !== undefined ? { x } : {})`). Also `noUncheckedIndexedAccess` (array/record
+  index access is `T | undefined` — guard or `!` it) and `verbatimModuleSyntax` (use `import type`).
+  ESM `NodeNext` — relative imports end in `.js`.
 - Internal imports use package names (`@symphony/core`). No `tsc -b`/project references — each package
   builds independently with tsup (emits its own d.ts). After editing a package others depend on,
   rebuild it before typechecking the dependents.
@@ -65,16 +83,25 @@ stream-json family (claude/codex/opencode).
 
 - Agent cwd must equal the worktree path; worktree must stay under `workspace.root` (path-safety).
 - Tracker is read-only from the orchestrator — the agent moves tickets via the semantic tracker tools
-  (`tracker_get_task`/`tracker_update_status`/`tracker_add_comment`); the raw `tracker_api` passthrough
-  is opt-in (`agent.allow_raw_tracker_api`). The agent may only set active + `review_state`, not terminal.
-- Plane has no public issue-relations endpoint, so `blockedBy` is always `[]` (auto-skip disabled); the
-  orchestrator compares state **names** while Plane mutates by state **UUID** (the adapter joins them).
+  (`tracker_get_task`/`tracker_update_status`/`tracker_add_comment`). The agent may only set active +
+  `review_state`, never a terminal state. CLI-backend writes funnel through the orchestrator's bridge.
+- The file store keeps state id === state name; `blockedBy` is always `[]` (auto-skip disabled). The
+  orchestrator's active/terminal classification comes from `config.tracker.{active,terminal}_states`
+  (state **names**); `states.json` is display-only (lane order + type/color) and tolerates drift (an
+  issue in a state missing from it still gets a board lane).
 - Token accounting uses absolute totals only (delta = max(0, next − lastReported)).
 - Workspaces/branches are preserved after success; cleaned only when the issue goes terminal. A
   turn that ends with the issue already terminal is cleaned up immediately (no continuation).
 - Continuation re-dispatch is bounded by `agent.max_continuations` (default 50, `0` = unlimited):
   after that many consecutive continuations without reaching a terminal state, the issue is moved to
   `blocked` for operator input instead of looping (prevents runaway token spend).
+- `switchProject` is the **only** path that re-points tracker/repo scope. It swaps the orchestrator's
+  mutable tracker/config atomically and clears `resumeSessions` (sessions don't carry across projects).
+
+## Docs & references
+
+- `../SPEC.md` — authoritative behavioral contract; `WORKFLOW.md.example` — annotated config contract.
+- `docs/RUNBOOK.md` — operate/troubleshoot a live run; `docs/VALIDATION_PLAN.md` — manual validation.
 
 ## Failure-recovery layer (the load-bearing recent additions)
 

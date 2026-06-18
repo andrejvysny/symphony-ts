@@ -6,11 +6,13 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./stdio-tracker-server": {
       "types": "./dist/tools/stdio-tracker-server.d.ts",
-      "import": "./dist/tools/stdio-tracker-server.js"
+      "import": "./dist/tools/stdio-tracker-server.js",
+      "default": "./dist/tools/stdio-tracker-server.js"
     }
   },
   "main": "./dist/index.js",

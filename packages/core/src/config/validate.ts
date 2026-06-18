@@ -5,7 +5,7 @@ export interface PreflightResult {
   errors: string[];
 }
 
-const SUPPORTED_TRACKERS = new Set(['plane', 'memory']);
+const SUPPORTED_TRACKERS = new Set(['file', 'memory']);
 
 /**
  * Dispatch preflight validation (SPEC §6.3). At startup a failure is fatal;
@@ -23,14 +23,6 @@ export function dispatchPreflight(
   if (!tracker.kind) errors.push('tracker.kind is required');
   else if (!SUPPORTED_TRACKERS.has(tracker.kind))
     errors.push(`tracker.kind "${tracker.kind}" is not supported`);
-
-  if (tracker.kind === 'plane') {
-    if (!tracker.api_key) errors.push('tracker.api_key is required for plane (set PLANE_API_KEY)');
-    if (!tracker.endpoint)
-      errors.push('tracker.endpoint is required for plane (Plane instance URL)');
-    if (!tracker.workspace_slug) errors.push('tracker.workspace_slug is required for plane');
-    if (!tracker.project_id) errors.push('tracker.project_id is required for plane');
-  }
 
   if (!workspace.repo) errors.push('workspace.repo is required (local path or git URL)');
 

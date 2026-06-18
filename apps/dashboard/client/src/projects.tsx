@@ -78,7 +78,7 @@ export function ProjectSwitcher(props: {
             <span class="mi-check">+</span>
             <span class="mi-body">
               <span class="mi-name">New project</span>
-              <span class="mi-sub">create a Plane project + repo</span>
+              <span class="mi-sub">create a new project + repo</span>
             </span>
           </button>
         </div>
@@ -87,7 +87,7 @@ export function ProjectSwitcher(props: {
   );
 }
 
-/** Slugify a project name into a Plane identifier (uppercase, alnum, ≤8 chars). */
+/** Slugify a project name into an issue identifier prefix (uppercase, alnum, ≤8 chars). */
 function deriveIdentifier(name: string): string {
   return name
     .toUpperCase()
@@ -149,7 +149,7 @@ export function CreateProjectModal(props: {
           />
         </label>
         <label class="field">
-          <span>Identifier (Plane prefix)</span>
+          <span>Identifier (issue id prefix)</span>
           <input
             data-test="project-identifier"
             value={identifier}

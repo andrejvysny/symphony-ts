@@ -73,7 +73,17 @@ export { type Logger, type LogFields, noopLogger } from './observability/logger.
 export { createLogger } from './observability/pino-logger.js';
 
 // runtime factories
-export { buildTracker, buildBackend, buildWorkspaceManager, buildMcpConfig } from './runtime.js';
+export {
+  buildTracker,
+  buildBackend,
+  buildWorkspaceManager,
+  buildMcpConfig,
+  fileTrackerOptions,
+  trackerSocketPath,
+} from './runtime.js';
+
+// tracker bridge (CLI agents → orchestrator single-writer)
+export { startTrackerBridge, type TrackerBridge } from './tracker-bridge.js';
 
 // dashboard source
 export {

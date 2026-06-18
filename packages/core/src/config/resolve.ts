@@ -58,28 +58,18 @@ export function parseConfig(raw: unknown): ParsedConfig {
  * Resolve `$VAR` indirection and path expansion. `workflowDir` is the directory
  * of WORKFLOW.md (relative paths resolve against it).
  */
-/** Env var consulted for `tracker.api_key` when not given inline, keyed by tracker kind. */
-const API_KEY_ENV_BY_KIND: Record<string, string> = { plane: 'PLANE_API_KEY' };
-
 export function resolveConfig(parsed: ParsedConfig, workflowDir: string): SymphonyConfig {
   const tracker = { ...parsed.tracker };
 
-  // api_key: explicit $VAR, else fall back to the per-kind env var (e.g. PLANE_API_KEY).
-  const apiKey =
-    resolveVar(tracker.api_key) ?? process.env[API_KEY_ENV_BY_KIND[tracker.kind] ?? ''];
-  if (apiKey !== undefined && apiKey.length > 0) tracker.api_key = apiKey;
-  else delete tracker.api_key;
+  // project_id (active project key): resolve `$VAR` indirection; drop when unset.
+  const projectId = resolveVar(tracker.project_id);
+  if (projectId !== undefined) tracker.project_id = projectId;
+  else if (tracker.project_id !== undefined) delete tracker.project_id;
 
-  // endpoint / workspace_slug / project_id: resolve `$VAR` indirection; drop when unset.
-  for (const key of ['endpoint', 'workspace_slug', 'project_id'] as const) {
-    const resolved = resolveVar(tracker[key]);
-    if (resolved !== undefined) tracker[key] = resolved;
-    else if (tracker[key] !== undefined) delete tracker[key];
-  }
-
-  const assignee = resolveVar(tracker.assignee);
-  if (assignee !== undefined) tracker.assignee = assignee;
-  else if (tracker.assignee !== undefined) delete tracker.assignee;
+  // data_root (file store): resolve `$VAR`, default to ~/.symphony, always store absolute.
+  const rawDataRoot = resolveVar(tracker.data_root);
+  const dataRootBase = rawDataRoot ?? path.join(os.homedir(), '.symphony');
+  tracker.data_root = expandPath(dataRootBase, workflowDir);
 
   const workspace = { ...parsed.workspace };
   const rawRoot = resolveVar(workspace.root);

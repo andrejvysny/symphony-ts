@@ -157,10 +157,9 @@ export async function runWorker(deps: WorkerDeps, ctx: WorkerContext): Promise<W
       for await (const ev of backend.run(runOpts)) {
         ctx.emit(ev);
         if (persistLog) {
-          await appendFile(
-            auditPath,
-            `${redactSecrets(JSON.stringify(ev), config.tracker.api_key)}\n`,
-          ).catch(() => undefined);
+          await appendFile(auditPath, `${redactSecrets(JSON.stringify(ev))}\n`).catch(
+            () => undefined,
+          );
         }
         if (ev.type === 'session_started') {
           sessionId = ev.sessionId;

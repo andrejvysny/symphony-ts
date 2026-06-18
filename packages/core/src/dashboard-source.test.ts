@@ -1,8 +1,12 @@
-import { describe, expect, it } from 'vitest';
-import { MemoryTracker } from '@symphony/tracker';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { MemoryTracker, scaffoldProject } from '@symphony/tracker';
 import { buildDashboardSource } from './dashboard-source.js';
 import { Orchestrator } from './orchestrator/orchestrator.js';
 import { PromptBuilder } from './prompt/builder.js';
+import { buildTracker } from './runtime.js';
 import { FakeWorkspaceManager, MockBackend, testConfig } from './test-support.js';
 
 function build() {
@@ -26,7 +30,7 @@ function build() {
 }
 
 describe('buildDashboardSource (project/settings surface)', () => {
-  it('reports projects + settings unavailable without a Plane tracker / store', () => {
+  it('reports projects + settings unavailable for a memory tracker without a store', () => {
     const caps = build().capabilities();
     expect(caps.projects).toBe(false);
     expect(caps.settings).toBe(false);
@@ -48,9 +52,52 @@ describe('buildDashboardSource (project/settings surface)', () => {
     ).rejects.toThrow();
   });
 
-  it('listProjects returns an empty registry for a non-Plane tracker', async () => {
+  it('listProjects returns an empty registry for a non-file tracker', async () => {
     const res = await build().listProjects();
     expect(res.projects).toEqual([]);
     expect(res.active_project_id).toBeNull();
+  });
+});
+
+describe('buildDashboardSource (file tracker projects)', () => {
+  let root: string;
+
+  function buildFile() {
+    const config = testConfig({
+      tracker: { kind: 'file', data_root: root, project_id: 'default' },
+    });
+    const orchestrator = new Orchestrator({
+      tracker: buildTracker(config),
+      backend: new MockBackend([{ status: 'success' }]),
+      workspaceManager: new FakeWorkspaceManager(),
+      config,
+      promptBuilder: new PromptBuilder('do'),
+    });
+    return buildDashboardSource(orchestrator); // no store wired
+  }
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(os.tmpdir(), 'symphony-ds-'));
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('capabilities.projects is false without a store even for the file tracker', () => {
+    expect(buildFile().capabilities().projects).toBe(false);
+  });
+
+  it('listProjects surfaces the active default + on-disk project dirs', async () => {
+    await scaffoldProject({
+      dataRoot: root,
+      projectKey: 'beta',
+      seed: { identifier: 'BET', states: [] },
+    });
+    const res = await buildFile().listProjects();
+    expect(res.active_project_id).toBe('default');
+    const ids = res.projects.map((p) => p.project_id).sort();
+    expect(ids).toContain('beta');
+    expect(ids).toContain('default');
+    expect(res.projects.find((p) => p.project_id === 'default')?.active).toBe(true);
   });
 });

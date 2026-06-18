@@ -6,15 +6,12 @@ export const DEFAULT_TERMINAL_STATES = ['Done', 'Closed', 'Canceled', 'Cancelled
 
 export const trackerSchema = z
   .object({
-    kind: z.string(),
-    /** Tracker base URL. Required for `plane` (the local instance URL); no default. */
-    endpoint: z.string().optional(),
-    api_key: z.string().optional(),
-    /** Plane: workspace slug (from the workspace URL). */
-    workspace_slug: z.string().optional(),
-    /** Plane: project UUID (from project settings). */
+    /** `file` (local per-issue JSON store, the default) or `memory` (tests). */
+    kind: z.string().default('file'),
+    /** `file` store root (resolved to ~/.symphony when omitted); per-project data lives under it. */
+    data_root: z.string().optional(),
+    /** Active project key — a slug naming the project's dir under `data_root` (default "default"). */
     project_id: z.string().optional(),
-    assignee: z.string().optional(),
     active_states: z.array(z.string()).default(DEFAULT_ACTIVE_STATES),
     terminal_states: z.array(z.string()).default(DEFAULT_TERMINAL_STATES),
     /** Non-active, non-terminal "park" state the agent moves an issue to for human review. */
@@ -23,8 +20,8 @@ export const trackerSchema = z
   .strict();
 
 /**
- * A registered project the dashboard can switch between. A project = a Plane `project_id` plus its
- * own git repo folder (and optionally a per-project workspace slug). The *active* project is the one
+ * A registered project the dashboard can switch between. A project = a `project_id` (its dir key
+ * under the file store's `data_root`) plus its own git repo folder. The *active* project is the one
  * whose `project_id`/`repo` currently sit in `tracker`/`workspace`; this list is the registry the
  * dashboard's project switcher reads + appends to (via "+ New project").
  */
@@ -33,8 +30,7 @@ export const projectEntrySchema = z
     name: z.string(),
     project_id: z.string(),
     repo: z.string(),
-    workspace_slug: z.string().optional(),
-    /** Plane short identifier (e.g. "SYM"); informational for the switcher. */
+    /** Issue id prefix (e.g. "SYM" → SYM-1); seeds the project's meta.json on creation. */
     identifier: z.string().optional(),
   })
   .strict();
@@ -80,8 +76,6 @@ export const agentSchema = z
     effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
     /** Thinking mode (SDK `thinking`): `adaptive` (Claude decides depth) or `disabled`. */
     thinking: z.enum(['adaptive', 'disabled']).optional(),
-    /** Also expose the raw `tracker_api` REST passthrough alongside the semantic tracker tools. */
-    allow_raw_tracker_api: z.boolean().default(false),
     max_budget_usd: z.number().positive().optional(),
     permission_mode: z.enum(permissionModes).default('bypassPermissions'),
     allowed_tools: z.array(z.string()).optional(),
@@ -150,7 +144,7 @@ export const workerSchema = z
 
 export const configSchema = z
   .object({
-    tracker: trackerSchema,
+    tracker: trackerSchema.prefault({}),
     /** Registry of switchable projects (dashboard project switcher). */
     projects: z.array(projectEntrySchema).default([]),
     /** Root dir for raw tmux session logs. Resolved to <tmpdir>/symphony_logs when omitted. */

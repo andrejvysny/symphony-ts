@@ -19,41 +19,32 @@ export {
   supportsActivity,
 } from './tracker.js';
 export { MemoryTracker, type MemoryTrackerOptions } from './memory/memory-tracker.js';
-export { PlaneTracker, type PlaneTrackerOptions } from './plane/adapter.js';
-export { PlaneClient, type PlaneClientOptions, type RestMethod } from './plane/client.js';
+export { FileTracker, type FileTrackerOptions, seedStates } from './file/adapter.js';
 export {
-  PlaneWorkspaceClient,
-  type PlaneWorkspaceClientOptions,
-  type WorkspaceProject,
-} from './plane/workspace-client.js';
+  FileStore,
+  type FileStoreOptions,
+  type FileStoreSeed,
+  type StoredIssue,
+  type StoreMeta,
+  listProjectKeys,
+  scaffoldProject,
+} from './file/store.js';
 export {
-  normalizeIssue as normalizePlaneIssue,
-  planePriorityToInt,
-  intToPlanePriority,
-  type RawPlaneIssue,
-  type NormalizeContext,
-} from './plane/normalize.js';
-export {
-  makePlaneRestExecutor,
-  validateArgs as validateTrackerApiArgs,
-  type TrackerApiArgs,
-  type ToolResult,
-  type RestFn,
-} from './tools/plane-rest.js';
-export {
-  buildStdioTrackerServer,
-  type TrackerStdioToolDeps,
-} from './tools/stdio-tracker-server.js';
-export {
-  makePlaneSemanticTools,
+  makeFileSemanticTools,
   TRACKER_GET_TASK_DESCRIPTION,
   TRACKER_UPDATE_STATUS_DESCRIPTION,
   TRACKER_ADD_COMMENT_DESCRIPTION,
-  type PlaneSemanticTools,
-  type SemanticPlaneClient,
+  type FileSemanticTarget,
+  type SemanticTools,
+  type ToolResult,
   type TrackerExecutor,
-} from './tools/plane-semantic.js';
-export { type Transport, type TransportResponse } from './http/transport.js';
+} from './tools/file-semantic.js';
+export {
+  buildStdioTrackerServer,
+  connectBridge,
+  type BridgeClient,
+  type TrackerStdioToolDeps,
+} from './tools/stdio-tracker-server.js';
 export {
   makeSetIssueStateExecutor,
   makeAddCommentExecutor,
