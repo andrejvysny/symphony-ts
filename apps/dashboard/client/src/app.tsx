@@ -53,7 +53,7 @@ export function App() {
       setProjects(p.projects);
       setActiveProjectId(p.active_project_id);
     } catch {
-      /* projects unavailable (non-plane tracker) — switcher stays hidden via caps */
+      /* projects unavailable (no store wired) — switcher stays hidden via caps */
     }
   }, []);
 

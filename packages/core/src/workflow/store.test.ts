@@ -101,7 +101,7 @@ describe('WorkflowStore', () => {
     const withVar = `---
 tracker:
   kind: memory
-  api_key: $MY_SECRET
+  data_root: $MY_DATA_ROOT
 projects: []
 workspace:
   repo: /tmp/r
@@ -125,7 +125,7 @@ Keep this body`;
     expect(store.snapshot().config.polling.interval_ms).toBe(7777);
 
     const onDisk = await readFile(file, 'utf8');
-    expect(onDisk).toContain('$MY_SECRET'); // secret indirection NOT expanded
+    expect(onDisk).toContain('$MY_DATA_ROOT'); // $VAR indirection NOT expanded on persist
     expect(onDisk).toContain('Keep this body'); // prompt body preserved
     expect(onDisk).toContain('project_id: p2');
   });

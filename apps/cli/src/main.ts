@@ -11,10 +11,13 @@ import {
   loadConfig,
   Orchestrator,
   PromptBuilder,
+  startTrackerBridge,
+  type TrackerBridge,
+  trackerSocketPath,
   WorkflowStore,
 } from '@symphony/core';
 import { startDashboard } from '@symphony/dashboard';
-import { supportsIssueCreation } from '@symphony/tracker';
+import { FileTracker, makeFileSemanticTools, supportsIssueCreation } from '@symphony/tracker';
 
 interface Args {
   positionals: string[];
@@ -114,6 +117,25 @@ async function runOrchestrator(args: Args): Promise<void> {
     ...(mcpConfig !== undefined ? { mcpConfig } : {}),
   });
 
+  // Single-writer bridge: CLI agents (separate processes) drive the file tracker through here so
+  // the orchestrator process is the only file writer. The SDK backend uses in-process tools instead.
+  let bridge: TrackerBridge | undefined;
+  if (config.tracker.kind === 'file') {
+    const allowed = (): string[] => {
+      const c = orchestrator.currentConfig().tracker;
+      return [...new Set([...c.active_states, c.review_state])];
+    };
+    bridge = await startTrackerBridge({
+      socketPath: trackerSocketPath(config),
+      resolveTools: () => {
+        const tr = orchestrator.currentTracker();
+        if (!(tr instanceof FileTracker)) throw new Error('tracker bridge requires a file tracker');
+        return makeFileSemanticTools(tr, allowed());
+      },
+    });
+    logger.info({ socket: bridge.socketPath }, 'tracker bridge listening');
+  }
+
   const portFlag = args.flags.get('port');
   const port = typeof portFlag === 'string' ? Number(portFlag) : (config.server?.port ?? undefined);
   let dashboard: Awaited<ReturnType<typeof startDashboard>> | undefined;
@@ -140,6 +162,7 @@ async function runOrchestrator(args: Args): Promise<void> {
     logger.info({}, 'shutting down');
     store.stop();
     if (dashboard) await dashboard.close();
+    if (bridge) await bridge.close();
     await orchestrator.stop();
     process.exit(0);
   };

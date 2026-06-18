@@ -1,13 +1,15 @@
+import path from 'node:path';
 import type { AgentEvent } from '@symphony/agent-backends';
 import {
-  PlaneWorkspaceClient,
+  listProjectKeys,
+  scaffoldProject,
+  seedStates,
   supportsActivity,
   supportsBoard,
   supportsIssueCreation,
   supportsIssueWriter,
   type IssuePatch,
   type LabelInfo,
-  type WorkspaceProject,
 } from '@symphony/tracker';
 import type { ProjectEntry } from './config/schema.js';
 import type { WorkflowStore } from './workflow/store.js';
@@ -103,7 +105,7 @@ export interface ProjectDTO {
   project_id: string;
   name: string;
   identifier: string | null;
-  /** Local git repo folder from the registry; null when the Plane project isn't registered. */
+  /** Local git repo folder from the registry; null when the project isn't registered. */
   repo: string | null;
   /** Present in the WORKFLOW.md `projects` registry (switchable). */
   registered: boolean;
@@ -178,6 +180,8 @@ export interface DashboardSource {
   listStates(): Promise<BoardStateDTO[]>;
   listLabels(): Promise<LabelInfo[]>;
   createTicket(input: CreateTicketInput): Promise<{ id: string; identifier: string }>;
+  /** Resolve an attachment URL (`/api/v1/uploads/<projectKey>/<rest>`) to a safe absolute file path. */
+  resolveUpload(projectKey: string, rest: string): string | null;
   moveIssue(issueId: string, stateId: string): Promise<void>;
   updateIssue(issueId: string, edit: IssueEditInput): Promise<void>;
   addComment(issueId: string, body: string): Promise<void>;
@@ -186,6 +190,15 @@ export interface DashboardSource {
   terminateAll(): Promise<{ terminated: number }>;
   unblock(issueId: string): Promise<{ unblocked: boolean }>;
   subscribeLogs(issueId: string, cb: (ev: AgentEvent) => void): () => void;
+}
+
+/** Turn a project name into a unique, path-safe project key (the on-disk directory name). */
+function slugify(name: string): string {
+  const s = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return s.length > 0 ? s : 'project';
 }
 
 /**
@@ -205,19 +218,6 @@ export function buildDashboardSource(
     return 'idle';
   }
 
-  /** Workspace-scoped Plane client built from the live config (follows project/workspace changes). */
-  function planeWorkspaceClient(): PlaneWorkspaceClient {
-    const t = orchestrator.currentConfig().tracker;
-    if (t.kind !== 'plane' || !t.endpoint || !t.api_key || !t.workspace_slug) {
-      throw new Error('project management requires a configured Plane tracker');
-    }
-    return new PlaneWorkspaceClient({
-      endpoint: t.endpoint,
-      apiKey: t.api_key,
-      workspaceSlug: t.workspace_slug,
-    });
-  }
-
   function requireStore(): WorkflowStore {
     if (!store) throw new Error('persistence unavailable: no workflow store wired');
     return store;
@@ -233,7 +233,7 @@ export function buildDashboardSource(
       return {
         board: supportsBoard(tracker),
         write: supportsIssueWriter(tracker) && supportsIssueCreation(tracker),
-        projects: orchestrator.currentConfig().tracker.kind === 'plane' && !!store,
+        projects: orchestrator.currentConfig().tracker.kind === 'file' && !!store,
         settings: !!store,
       };
     },
@@ -245,28 +245,11 @@ export function buildDashboardSource(
 
     async listProjects(): Promise<ProjectsDTO> {
       const cfg = orchestrator.currentConfig();
-      const registry = new Map(cfg.projects.map((p) => [p.project_id, p]));
-      const active = cfg.tracker.project_id ?? null;
-      let live: WorkspaceProject[] = [];
-      try {
-        live = await planeWorkspaceClient().listProjects();
-      } catch {
-        live = []; // Plane unreachable: fall back to the registry below.
-      }
+      const t = cfg.tracker;
+      // For the file tracker the active project defaults to "default"; other trackers may have none.
+      const active = t.kind === 'file' ? (t.project_id ?? 'default') : (t.project_id ?? null);
       const byId = new Map<string, ProjectDTO>();
-      for (const lp of live) {
-        const reg = registry.get(lp.id);
-        byId.set(lp.id, {
-          project_id: lp.id,
-          name: reg?.name ?? lp.name,
-          identifier: lp.identifier || reg?.identifier || null,
-          repo: reg?.repo ?? null,
-          registered: reg !== undefined,
-          active: lp.id === active,
-        });
-      }
       for (const p of cfg.projects) {
-        if (byId.has(p.project_id)) continue;
         byId.set(p.project_id, {
           project_id: p.project_id,
           name: p.name,
@@ -275,6 +258,20 @@ export function buildDashboardSource(
           registered: true,
           active: p.project_id === active,
         });
+      }
+      // Surface any scaffolded-but-unregistered project dirs under the file store's data_root.
+      if (t.kind === 'file' && t.data_root) {
+        for (const key of await listProjectKeys(t.data_root)) {
+          if (byId.has(key)) continue;
+          byId.set(key, {
+            project_id: key,
+            name: key,
+            identifier: null,
+            repo: null,
+            registered: false,
+            active: key === active,
+          });
+        }
       }
       if (active && !byId.has(active)) {
         byId.set(active, {
@@ -298,7 +295,6 @@ export function buildDashboardSource(
       const mutate = (raw: Record<string, unknown>): void => {
         const tracker = (raw['tracker'] ??= {}) as Record<string, unknown>;
         tracker['project_id'] = entry.project_id;
-        if (entry.workspace_slug) tracker['workspace_slug'] = entry.workspace_slug;
         const workspace = (raw['workspace'] ??= {}) as Record<string, unknown>;
         workspace['repo'] = entry.repo;
       };
@@ -311,16 +307,32 @@ export function buildDashboardSource(
     async createProject(input: CreateProjectInput): Promise<ProjectDTO> {
       const st = requireStore();
       const cfg = orchestrator.currentConfig();
-      const ws = planeWorkspaceClient();
-      const created = await ws.createProject({ name: input.name, identifier: input.identifier });
-      await ws
-        .seedStates(created.id, [...cfg.tracker.active_states, ...cfg.tracker.terminal_states])
-        .catch(() => undefined);
+      const t = cfg.tracker;
+      if (t.kind !== 'file' || !t.data_root)
+        throw new Error('project creation requires a file tracker');
+      const dataRoot = t.data_root;
+      // Mint a unique, path-safe project key from the name.
+      const taken = new Set([
+        ...cfg.projects.map((p) => p.project_id),
+        ...(await listProjectKeys(dataRoot)),
+      ]);
+      const base = slugify(input.name);
+      let key = base;
+      for (let n = 2; taken.has(key); n++) key = `${base}-${n}`;
+      // Scaffold the on-disk project (seed states from the configured workflow).
+      await scaffoldProject({
+        dataRoot,
+        projectKey: key,
+        seed: {
+          identifier: input.identifier,
+          states: seedStates(t.active_states, t.review_state, t.terminal_states),
+        },
+      });
       const entry: ProjectEntry = {
         name: input.name,
-        project_id: created.id,
+        project_id: key,
         repo: input.repo,
-        ...(created.identifier ? { identifier: created.identifier } : {}),
+        identifier: input.identifier,
       };
       const snap = await st.persist((raw) => {
         const list = Array.isArray(raw['projects']) ? (raw['projects'] as unknown[]) : [];
@@ -329,9 +341,9 @@ export function buildDashboardSource(
       });
       orchestrator.applyConfig(snap.config); // make the new registry entry visible immediately
       return {
-        project_id: created.id,
+        project_id: key,
         name: input.name,
-        identifier: created.identifier || null,
+        identifier: input.identifier,
         repo: input.repo,
         registered: true,
         active: false,
@@ -466,7 +478,7 @@ export function buildDashboardSource(
         ...(input.stateId !== undefined ? { stateId: input.stateId } : {}),
         ...(attachments.length ? { attachments } : {}),
       });
-      // Proper attachment records (idempotent on Linear) in addition to the embedded markdown.
+      // Proper attachment records in addition to the embedded markdown.
       if (supportsIssueWriter(tracker)) {
         for (const a of attachments) await tracker.attachToIssue(issue.id, a.url, a.title);
       }
@@ -502,6 +514,19 @@ export function buildDashboardSource(
       const tracker = orchestrator.currentTracker();
       if (!supportsIssueWriter(tracker)) throw new Error('tracker does not support comments');
       await tracker.addComment(issueId, body);
+    },
+
+    resolveUpload(projectKey: string, rest: string): string | null {
+      const t = orchestrator.currentConfig().tracker;
+      if (t.kind !== 'file' || !t.data_root) return null;
+      if (projectKey.includes('/') || projectKey.includes('\\') || projectKey.includes('..'))
+        return null;
+      const base = path.join(t.data_root, 'projects', projectKey, 'uploads');
+      const abs = path.resolve(base, rest);
+      const rel = path.relative(base, abs);
+      // Contain to the uploads dir: reject traversal / absolute escapes.
+      if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+      return abs;
     },
   };
 }

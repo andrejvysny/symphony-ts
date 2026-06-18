@@ -1,31 +1,28 @@
 ---
 # Symphony-TS workflow contract. Copy to WORKFLOW.md and customize.
 tracker:
-  kind: plane
-  # Local self-hosted Plane instance — start it with `pnpm plane:up` (see infra/plane/README.md).
-  endpoint: http://localhost
-  # Reads PLANE_API_KEY from the environment when api_key is unset or "$PLANE_API_KEY".
-  api_key: $PLANE_API_KEY
-  # workspace_slug: from the workspace URL `/<workspace-slug>/`. project_id: the project UUID.
-  workspace_slug: "your-workspace-slug"
-  project_id: "your-project-uuid"
-  # Symphony custom flow — configure these state names in the Plane project's workflow.
+  kind: file
+  # Local file store root — every project + its issues live under here as plain JSON.
+  # Defaults to ~/.symphony when omitted. No database, no Docker, no external services.
+  data_root: ~/.symphony
+  # Active project key: a slug naming its directory under <data_root>/projects/. Defaults to "default".
+  project_id: default
+  # Symphony custom flow. The agent may set active_states + review_state (never terminal).
   active_states: [Todo, In Progress, Rework, Merging]
   terminal_states: [Done, Cancelled]
   # Non-active, non-terminal "park" state: the agent moves a finished issue here for a human.
-  # The agent may only set active_states + review_state (never terminal). Rename to match your board.
   review_state: Human Review
 
 # Switchable projects for the dashboard's project switcher. The ACTIVE project is whichever
 # project_id/repo sit in `tracker`/`workspace` above; this registry is the set you can switch to
-# (and what "+ New project" appends to). Each entry = a Plane project_id + its own repo folder.
+# (and what "+ New project" appends to). Each entry = a project key + its own repo folder.
 # Switching live re-points the orchestrator (no restart). Managed from the dashboard — listed here
 # so it survives restarts.
 projects:
   # - name: Backend
-  #   project_id: "another-project-uuid"
+  #   project_id: backend       # the project's dir key under <data_root>/projects/
   #   repo: ~/code/backend
-  #   identifier: BE          # optional, informational
+  #   identifier: BE            # issue id prefix → BE-1, BE-2, …
 
 polling:
   interval_ms: 5000
@@ -51,7 +48,6 @@ agent:
   # model: claude-opus-4-8         # optional model override
   # effort: high                   # low | medium | high | xhigh | max (reasoning depth; default high)
   # thinking: adaptive             # adaptive (Claude decides) | disabled
-  # allow_raw_tracker_api: false   # also expose the raw REST `tracker_api` fallback tool
   # max_budget_usd: 5              # optional per-turn budget cap (claude-sdk)
   # system_prompt: |               # override the built-in Claude-optimized operating contract
   #   <role>You are ...</role>
@@ -67,7 +63,7 @@ server:
   port: 4500                 # enables the dashboard at http://127.0.0.1:4500/
 ---
 
-You have been assigned Plane issue {{ issue.identifier }}, working in an isolated git worktree on the branch you were started on.
+You have been assigned issue {{ issue.identifier }}, working in an isolated git worktree on the branch you were started on.
 
 <issue>
 Identifier: {{ issue.identifier }}

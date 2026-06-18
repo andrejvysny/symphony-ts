@@ -1,22 +1,15 @@
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parseConfig, resolveConfig } from './resolve.js';
 
-const ENV_KEYS = ['PLANE_API_KEY', 'SYMPHONY_TEST_TOKEN'];
 afterEach(() => {
-  for (const k of ENV_KEYS) delete process.env[k];
-});
-
-const planeTracker = (extra: Record<string, unknown> = {}) => ({
-  kind: 'plane',
-  endpoint: 'http://localhost',
-  workspace_slug: 'ws',
-  project_id: 'pid',
-  ...extra,
+  delete process.env['SYMPHONY_TEST_TOKEN'];
 });
 
 describe('config parse + resolve', () => {
   it('applies Symphony custom-state defaults', () => {
-    const c = resolveConfig(parseConfig({ tracker: planeTracker() }), '/tmp');
+    const c = resolveConfig(parseConfig({ tracker: { kind: 'file' } }), '/tmp');
     expect(c.tracker.active_states).toContain('Rework');
     expect(c.tracker.active_states).toContain('Merging');
     expect(c.tracker.terminal_states).toContain('Done');
@@ -24,29 +17,22 @@ describe('config parse + resolve', () => {
     expect(c.agent.permission_mode).toBe('bypassPermissions');
   });
 
-  it('resolves $VAR for api_key and falls back to PLANE_API_KEY for plane', () => {
-    process.env['SYMPHONY_TEST_TOKEN'] = 'tok-123';
-    const c = resolveConfig(
-      parseConfig({ tracker: planeTracker({ api_key: '$SYMPHONY_TEST_TOKEN' }) }),
-      '/tmp',
-    );
-    expect(c.tracker.api_key).toBe('tok-123');
-
-    process.env['PLANE_API_KEY'] = 'fallback';
-    const c2 = resolveConfig(parseConfig({ tracker: planeTracker() }), '/tmp');
-    expect(c2.tracker.api_key).toBe('fallback');
+  it('defaults tracker.kind to file and data_root to ~/.symphony', () => {
+    const c = resolveConfig(parseConfig({}), '/tmp');
+    expect(c.tracker.kind).toBe('file');
+    expect(c.tracker.data_root).toBe(path.join(os.homedir(), '.symphony'));
   });
 
-  it('resolves $VAR for plane endpoint/workspace_slug/project_id and keeps endpoint un-defaulted', () => {
-    process.env['SYMPHONY_TEST_TOKEN'] = 'http://plane.local';
+  it('resolves $VAR for project_id and ~/$VAR for data_root', () => {
+    process.env['SYMPHONY_TEST_TOKEN'] = 'proj-x';
     const c = resolveConfig(
-      parseConfig({ tracker: planeTracker({ endpoint: '$SYMPHONY_TEST_TOKEN' }) }),
-      '/tmp',
+      parseConfig({
+        tracker: { kind: 'file', project_id: '$SYMPHONY_TEST_TOKEN', data_root: '~/store' },
+      }),
+      '/base',
     );
-    expect(c.tracker.endpoint).toBe('http://plane.local');
-    // memory tracker has no endpoint and is not given a Linear default
-    const mem = resolveConfig(parseConfig({ tracker: { kind: 'memory' } }), '/tmp');
-    expect(mem.tracker.endpoint).toBeUndefined();
+    expect(c.tracker.project_id).toBe('proj-x');
+    expect(c.tracker.data_root).toBe(path.join(os.homedir(), 'store'));
   });
 
   it('expands ~ and resolves workspace.root to absolute', () => {

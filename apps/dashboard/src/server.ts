@@ -1,4 +1,5 @@
-import { existsSync } from 'node:fs';
+import { createReadStream, existsSync } from 'node:fs';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
@@ -22,6 +23,19 @@ const OTHER_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'] as const;
 const REFRESH_MIN_INTERVAL_MS = 500;
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
+
+const UPLOAD_CONTENT_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.pdf': 'application/pdf',
+  '.txt': 'text/plain; charset=utf-8',
+  '.log': 'text/plain; charset=utf-8',
+  '.json': 'application/json',
+};
 
 export function createDashboardServer(source: DashboardSource): FastifyInstance {
   const app = Fastify({ logger: false });
@@ -317,6 +331,19 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
     url: '/api/v1/refresh',
     handler: methodNotAllowed,
   });
+
+  // ---- attachment files (local upload store) ----
+  app.get<{ Params: { projectKey: string; '*': string } }>(
+    '/api/v1/uploads/:projectKey/*',
+    async (req, reply) => {
+      const abs = source.resolveUpload(req.params.projectKey, req.params['*']);
+      if (!abs || !existsSync(abs))
+        return reply.code(404).send({ error: { code: 'upload_not_found' } });
+      const type =
+        UPLOAD_CONTENT_TYPES[path.extname(abs).toLowerCase()] ?? 'application/octet-stream';
+      return reply.type(type).send(createReadStream(abs));
+    },
+  );
 
   // ---- issue detail (param route LAST; static routes above take precedence) ----
   app.get<{ Params: { identifier: string } }>('/api/v1/:identifier', async (req, reply) => {

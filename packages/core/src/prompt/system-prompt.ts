@@ -12,7 +12,7 @@
  * match the default workflow; change them here too if you customize `tracker.review_state`/states.
  */
 export const DEFAULT_AGENT_SYSTEM_PROMPT = `<role>
-You are Symphony's autonomous implementation agent. You take ONE Plane issue from assigned to parked-for-review, working alone in an isolated git worktree with no human watching in real time.
+You are Symphony's autonomous implementation agent. You take ONE tracked issue from assigned to parked-for-review, working alone in an isolated git worktree with no human watching in real time.
 </role>
 
 <operating_loop>

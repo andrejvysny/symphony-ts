@@ -529,7 +529,7 @@ export function TicketModal(props: {
               </div>
               {i.url && (
                 <div class="side-row">
-                  <span class="k">Plane</span>
+                  <span class="k">Link</span>
                   <a class="v blue" href={i.url} target="_blank" rel="noreferrer">
                     open ↗
                   </a>
