@@ -14,7 +14,7 @@ import { AgentDrawer, AgentsView } from './agents.js';
 import { CreateTicketModal, TicketModal } from './modals.js';
 import { CreateProjectModal, ProjectSwitcher } from './projects.js';
 import { SettingsModal } from './settings.js';
-import { LiveDot } from './util.js';
+import { LiveDot, ThemeToggle } from './util.js';
 
 export function App() {
   const [board, setBoard] = useState<BoardData | null>(null);
@@ -70,10 +70,26 @@ export function App() {
         if (c.projects) void refreshProjects();
       })
       .catch(() => undefined);
-    const poll = setInterval(() => void refresh(), 2000);
+    // Live updates: refetch on each board-changed push (SSE). A 2s poll is the fallback while SSE is
+    // down (e.g. a buffering proxy); a slow 15s poll is a safety net even when SSE is healthy.
+    let sseHealthy = false;
+    const es = api.eventStream();
+    es.onopen = () => {
+      sseHealthy = true;
+    };
+    es.onmessage = () => void refresh();
+    es.onerror = () => {
+      sseHealthy = false;
+    };
+    const poll = setInterval(() => {
+      if (!sseHealthy) void refresh();
+    }, 2000);
+    const slow = setInterval(() => void refresh(), 15000);
     const tick = setInterval(() => setNow(Date.now()), 1000);
     return () => {
+      es.close();
       clearInterval(poll);
+      clearInterval(slow);
       clearInterval(tick);
     };
   }, [refresh, refreshProjects]);
@@ -193,6 +209,7 @@ export function App() {
           <button class="btn primary" data-test="new-ticket" onClick={() => setShowCreate(true)}>
             + New ticket
           </button>
+          <ThemeToggle />
           {caps?.settings && (
             <button
               class="iconbtn"
@@ -207,6 +224,13 @@ export function App() {
       </header>
 
       {error && <div class="err-banner">⚠ {error}</div>}
+
+      {snap?.merge_failures?.length ? (
+        <div class="err-banner" data-test="merge-failures">
+          ⚠ Auto-merge failed for {snap.merge_failures.map((m) => m.issue_identifier).join(', ')} —
+          the branch is preserved; merge it manually.
+        </div>
+      ) : null}
 
       {!board && !error && <div class="center">connecting…</div>}
 
@@ -249,6 +273,11 @@ export function App() {
           meta={meta}
           onClose={() => setSelected(null)}
           onChanged={() => void refresh()}
+          onViewRunningAgent={(id) => {
+            setSelected(null);
+            setTab('agents');
+            setAgentIssueId(id);
+          }}
         />
       )}
 

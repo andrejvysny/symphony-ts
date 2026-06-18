@@ -23,6 +23,14 @@ export function SettingsModal(props: { onClose: () => void; onSaved: () => void 
     setSaved(false);
   };
 
+  const setWorkspace = <K extends keyof SettingsDTO['workspace']>(
+    k: K,
+    v: SettingsDTO['workspace'][K],
+  ) => {
+    setForm((f) => (f ? { ...f, workspace: { ...f.workspace, [k]: v } } : f));
+    setSaved(false);
+  };
+
   const save = async () => {
     if (!form) return;
     setBusy(true);
@@ -43,7 +51,11 @@ export function SettingsModal(props: { onClose: () => void; onSaved: () => void 
           max_budget_usd: form.agent.max_budget_usd,
         },
         polling: { interval_ms: form.polling.interval_ms },
-        workspace: { branch_prefix: form.workspace.branch_prefix },
+        workspace: {
+          branch_prefix: form.workspace.branch_prefix,
+          mode: form.workspace.mode,
+          merge_on_accept: form.workspace.merge_on_accept,
+        },
       });
       setSaved(true);
       props.onSaved();
@@ -184,22 +196,46 @@ export function SettingsModal(props: { onClose: () => void; onSaved: () => void 
                 'set-poll-interval',
               )}
               <label class="field">
-                <span>Branch prefix</span>
-                <input
-                  data-test="set-branch-prefix"
-                  value={form.workspace.branch_prefix}
-                  onInput={(e) =>
-                    setForm((f) =>
-                      f
-                        ? {
-                            ...f,
-                            workspace: { branch_prefix: (e.target as HTMLInputElement).value },
-                          }
-                        : f,
-                    )
-                  }
-                />
+                <span>Workspace mode</span>
+                <select
+                  data-test="set-workspace-mode"
+                  value={form.workspace.mode}
+                  onChange={(e) => setWorkspace('mode', (e.target as HTMLSelectElement).value)}
+                >
+                  <option value="single_dir">
+                    single_dir — one project dir, one task at a time
+                  </option>
+                  <option value="worktree">worktree — isolated per-ticket worktrees</option>
+                </select>
               </label>
+              <span class="muted" style="font-size:11px">
+                Mode applies immediately when no agents are running; otherwise on the next restart.
+              </span>
+              {form.workspace.mode === 'worktree' && (
+                <>
+                  <label class="field">
+                    <span>Branch prefix</span>
+                    <input
+                      data-test="set-branch-prefix"
+                      value={form.workspace.branch_prefix}
+                      onInput={(e) =>
+                        setWorkspace('branch_prefix', (e.target as HTMLInputElement).value)
+                      }
+                    />
+                  </label>
+                  <label class="field check">
+                    <input
+                      type="checkbox"
+                      data-test="set-merge-on-accept"
+                      checked={form.workspace.merge_on_accept}
+                      onChange={(e) =>
+                        setWorkspace('merge_on_accept', (e.target as HTMLInputElement).checked)
+                      }
+                    />
+                    <span>Merge the issue branch into base on accept</span>
+                  </label>
+                </>
+              )}
             </div>
           </div>
         )}

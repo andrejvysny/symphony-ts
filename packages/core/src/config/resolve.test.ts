@@ -10,9 +10,10 @@ afterEach(() => {
 describe('config parse + resolve', () => {
   it('applies Symphony custom-state defaults', () => {
     const c = resolveConfig(parseConfig({ tracker: { kind: 'file' } }), '/tmp');
-    expect(c.tracker.active_states).toContain('Rework');
-    expect(c.tracker.active_states).toContain('Merging');
+    // Simplified workflow: lanes are Todo + In Progress (rework/merging are no longer states).
+    expect(c.tracker.active_states).toEqual(['Todo', 'In Progress']);
     expect(c.tracker.terminal_states).toContain('Done');
+    expect(c.workspace.mode).toBe('single_dir');
     expect(c.agent.backend).toBe('claude-sdk');
     expect(c.agent.permission_mode).toBe('bypassPermissions');
   });

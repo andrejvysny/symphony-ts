@@ -35,7 +35,7 @@ export class PromptBuilder {
 
   /**
    * Continuation guidance for turns after the first (SPEC §7.1). Optionally enriched with the
-   * worktree branch + a `git status --porcelain` summary so the agent re-orients without re-deriving
+   * branch + a `git status --porcelain` summary so the agent re-orients without re-deriving
    * its cwd/state (cuts wasted continuation turns).
    */
   continuation(
@@ -47,7 +47,7 @@ export class PromptBuilder {
     const lines = [
       `Continue working on ${issue.identifier}: "${issue.title}" (turn ${turn} of ${maxTurns}).`,
     ];
-    if (ctx.branch) lines.push(`Worktree branch: ${ctx.branch}.`);
+    if (ctx.branch) lines.push(`Branch: ${ctx.branch}.`);
     if (ctx.gitStatus !== undefined) {
       const status = ctx.gitStatus.trim();
       lines.push(

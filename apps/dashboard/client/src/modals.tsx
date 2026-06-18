@@ -201,6 +201,8 @@ export function TicketModal(props: {
   meta: RuntimeInfo | null;
   onClose: () => void;
   onChanged: () => void;
+  /** Jump to the live agent view for this ticket (shown only while a session is running). */
+  onViewRunningAgent?: (issueId: string) => void;
 }) {
   const i = props.issue;
   const [detail, setDetail] = useState<IssueDetailDTO | null>(null);
@@ -209,6 +211,7 @@ export function TicketModal(props: {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [reviewNotes, setReviewNotes] = useState('');
 
   // Editable fields (status uses the dedicated instant-move path below).
   const [title, setTitle] = useState(i.title);
@@ -311,9 +314,61 @@ export function TicketModal(props: {
     }
   };
 
+  // ---- Human-review actions: resolve targets from the workflow (no hardcoded state names) ----
+  // Done/Cancelled come from board-state type. Rework sends the ticket back to In Progress with a
+  // `rework` tag (Rework is no longer a state). The section shows only while the issue is in review.
+  const reviewState = props.meta?.review_state;
+  const inReview = reviewState !== undefined && currentState === reviewState;
+  const doneState = props.states.find((s) => s.type === 'completed');
+  const cancelledState = props.states.find((s) => s.type === 'canceled' || s.type === 'cancelled');
+  const inProgressName = props.meta?.in_progress_state;
+  const reworkState = inProgressName
+    ? props.states.find((s) => s.name === inProgressName)
+    : undefined;
+  // Post the notes (if any), then move. Used by Accept / Discard.
+  const reviewMove = async (target: BoardStateDTO | undefined) => {
+    if (!target) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      if (reviewNotes.trim()) await api.addComment(i.id, reviewNotes.trim());
+      await api.moveIssue(i.id, target.id);
+      setReviewNotes('');
+      await load();
+      props.onChanged();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  // Rework: tag the ticket `rework` and send it back to In Progress so the agent picks it up again.
+  const reworkAction = async () => {
+    if (!reworkState) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      if (reviewNotes.trim()) await api.addComment(i.id, reviewNotes.trim());
+      if (!labels.includes('rework')) {
+        const next = [...labels, 'rework'];
+        setLabels(next);
+        await api.updateIssue(i.id, { labels: next });
+      }
+      await api.moveIssue(i.id, reworkState.id);
+      setReviewNotes('');
+      await load();
+      props.onChanged();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const branch = `${props.meta?.branch_prefix ?? 'symphony/'}${i.identifier}`;
   const backend = props.session?.backend ?? props.meta?.backend ?? '—';
   const scope = i.identifier.split('-')[0] ?? 'SYM';
+  const worktree = detail?.worktree_path ?? null;
 
   return (
     <div class="overlay" onClick={props.onClose}>
@@ -501,6 +556,56 @@ export function TicketModal(props: {
               </datalist>
             </div>
 
+            {inReview && (
+              <>
+                <div class="hr" />
+                <div class="review-actions" data-test="review-actions">
+                  <div class="label">Review</div>
+                  <textarea
+                    class="review-notes"
+                    data-test="review-notes"
+                    placeholder="Notes (optional, attached to the action)…"
+                    value={reviewNotes}
+                    disabled={busy}
+                    onInput={(e) => setReviewNotes((e.target as HTMLTextAreaElement).value)}
+                  />
+                  <div class="review-btns">
+                    <button
+                      class="btn sm primary"
+                      data-test="review-accept"
+                      disabled={busy || !doneState}
+                      title={doneState ? 'Accept — move to Done' : 'no Done state in workflow'}
+                      onClick={() => void reviewMove(doneState)}
+                    >
+                      Accept
+                    </button>
+                    <button
+                      class="btn sm"
+                      data-test="review-rework"
+                      disabled={busy || !reworkState}
+                      title={
+                        reworkState
+                          ? `Rework — tag 'rework' and send back to ${reworkState.name}`
+                          : 'no In Progress state'
+                      }
+                      onClick={() => void reworkAction()}
+                    >
+                      Rework
+                    </button>
+                    <button
+                      class="btn sm danger"
+                      data-test="review-discard"
+                      disabled={busy || !cancelledState}
+                      title={cancelledState ? 'Discard — move to Cancelled' : 'no Cancelled state'}
+                      onClick={() => void reviewMove(cancelledState)}
+                    >
+                      Discard
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+
             <div class="hr" />
 
             <div style="display:flex;flex-direction:column;gap:11px">
@@ -508,6 +613,19 @@ export function TicketModal(props: {
                 <span class="k">Branch</span>
                 <span class="v blue">{branch}</span>
               </div>
+              {worktree && (
+                <div class="side-row">
+                  <span class="k">Workspace</span>
+                  <a
+                    class="v blue"
+                    data-test="open-vscode"
+                    href={`vscode://file${encodeURI(worktree)}`}
+                    title={worktree}
+                  >
+                    open in VS Code ↗
+                  </a>
+                </div>
+              )}
               <div class="side-row">
                 <span class="k">Backend</span>
                 <span class="v">{backend}</span>
@@ -522,6 +640,16 @@ export function TicketModal(props: {
                       : ''}
                   </span>
                 </div>
+              )}
+              {props.session && props.onViewRunningAgent && (
+                <button
+                  class="btn sm"
+                  data-test="view-running-agent"
+                  title="Open the live agent view for this ticket"
+                  onClick={() => props.onViewRunningAgent?.(i.id)}
+                >
+                  ▶ View running agent
+                </button>
               )}
               <div class="side-row">
                 <span class="k">Created</span>

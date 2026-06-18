@@ -19,7 +19,7 @@ function resolveVar(value: string | undefined): string | undefined {
   return env && env.length > 0 ? env : undefined;
 }
 
-function isRemoteRepo(repo: string): boolean {
+export function isRemoteRepo(repo: string): boolean {
   return /:\/\//.test(repo) || /^[^/]+@[^/]+:/.test(repo); // scheme:// or git@host:path
 }
 

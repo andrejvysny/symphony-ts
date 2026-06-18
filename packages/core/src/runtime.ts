@@ -16,7 +16,9 @@ import {
 } from '@symphony/tracker';
 import { ConfigError } from '@symphony/shared';
 import type { SymphonyConfig } from './config/resolve.js';
+import type { IWorkspaceManager } from './workspace/manager.js';
 import { WorkspaceManager } from './workspace/manager.js';
+import { SingleDirWorkspaceManager } from './workspace/single-dir-manager.js';
 
 /** Resolve the file store root (resolve.ts always sets data_root; guard for direct callers). */
 function dataRootOf(config: SymphonyConfig): string {
@@ -40,6 +42,7 @@ export function fileTrackerOptions(config: SymphonyConfig): FileTrackerOptions {
     activeStates: t.active_states,
     terminalStates: t.terminal_states,
     reviewState: t.review_state,
+    backlogState: t.backlog_state,
   };
 }
 
@@ -69,8 +72,11 @@ export function buildBackend(config: SymphonyConfig): CodingAgentBackend {
   );
 }
 
-export function buildWorkspaceManager(config: SymphonyConfig): WorkspaceManager {
-  return new WorkspaceManager(config.workspace, config.hooks);
+export function buildWorkspaceManager(config: SymphonyConfig): IWorkspaceManager {
+  if (config.workspace.mode === 'worktree') {
+    return new WorkspaceManager(config.workspace, config.hooks);
+  }
+  return new SingleDirWorkspaceManager(config.workspace, config.hooks);
 }
 
 /**

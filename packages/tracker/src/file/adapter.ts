@@ -26,6 +26,8 @@ export interface FileTrackerOptions {
   terminalStates: string[];
   /** Non-active, non-terminal park state seeded as a board lane. */
   reviewState?: string;
+  /** Non-active, non-terminal "not yet ready" lane, seeded leftmost (human-only). */
+  backlogState?: string;
   onWarn?: (msg: string) => void;
 }
 
@@ -39,8 +41,12 @@ function typeFor(name: string, terminalState: boolean): string {
   return 'started';
 }
 
-/** Seed ordered board states from the configured active / review / terminal state names. */
+/**
+ * Seed ordered board states from the configured backlog / active / review / terminal state names.
+ * Order (left→right): backlog → active → review → terminal. Empty/undefined names are skipped.
+ */
 export function seedStates(
+  backlog: string | undefined,
   active: string[],
   review: string | undefined,
   terminal: string[],
@@ -49,10 +55,11 @@ export function seedStates(
   const seen = new Set<string>();
   let pos = 0;
   const push = (name: string, terminalState: boolean): void => {
-    if (seen.has(name)) return;
+    if (name.length === 0 || seen.has(name)) return;
     seen.add(name);
     out.push({ id: name, name, type: typeFor(name, terminalState), position: pos++ });
   };
+  if (backlog !== undefined) push(backlog, false);
   for (const name of active) push(name, false);
   if (review !== undefined) push(review, false);
   for (const name of terminal) push(name, true);
@@ -83,7 +90,12 @@ export class FileTracker
       projectKey: opts.projectKey,
       seed: {
         identifier: opts.identifier,
-        states: seedStates(opts.activeStates, opts.reviewState, opts.terminalStates),
+        states: seedStates(
+          opts.backlogState,
+          opts.activeStates,
+          opts.reviewState,
+          opts.terminalStates,
+        ),
       },
       ...(opts.onWarn !== undefined ? { onWarn: opts.onWarn } : {}),
     });

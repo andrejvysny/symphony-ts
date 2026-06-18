@@ -11,6 +11,18 @@
       href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
+    <script>
+      // Apply the saved theme before first paint so there's no dark→light flash.
+      // Defaults to dark; the in-app toggle writes 'symphony-theme'.
+      (function () {
+        try {
+          var t = localStorage.getItem('symphony-theme');
+          document.documentElement.dataset.theme = t === 'light' ? 'light' : 'dark';
+        } catch (e) {
+          document.documentElement.dataset.theme = 'dark';
+        }
+      })();
+    </script>
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>

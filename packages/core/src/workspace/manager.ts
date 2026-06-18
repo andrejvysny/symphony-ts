@@ -4,13 +4,26 @@ import type { NormalizedIssue } from '@symphony/shared';
 import { ConfigError } from '@symphony/shared';
 import type { HooksConfig, WorkspaceConfig } from '../config/schema.js';
 import { runHook, type HookOutcome } from './hooks.js';
-import { addWorktree, ensureSharedClone, removeWorktree, type SharedRepo } from './git-worktree.js';
+import {
+  addWorktree,
+  ensureSharedClone,
+  mergeIntoBase,
+  removeWorktree,
+  type SharedRepo,
+} from './git-worktree.js';
 import { assertUnderRoot, sanitizeIdentifier } from './path-safety.js';
 
 export interface Workspace {
   path: string;
   branch: string;
   created: boolean;
+}
+
+/** Result of integrating an issue's work into the base branch on accept. */
+export interface IntegrateResult {
+  merged: boolean;
+  conflict?: boolean;
+  reason?: string;
 }
 
 /** The subset of workspace operations the orchestrator/worker depend on (injectable in tests). */
@@ -20,6 +33,13 @@ export interface IWorkspaceManager {
   createForIssue(issue: NormalizedIssue): Promise<Workspace>;
   runBeforeRun(issue: NormalizedIssue, ws: Workspace): Promise<HookOutcome>;
   runAfterRun(issue: NormalizedIssue, ws: Workspace): Promise<HookOutcome>;
+  /**
+   * Integrate the issue's completed work into the base branch on accept (review→Done), called BEFORE
+   * cleanup. worktree mode merges the issue branch into base; single_dir is a no-op (the agent already
+   * committed on the live branch). On conflict, returns `{merged:false, conflict:true}` and leaves
+   * base + branch untouched for manual resolution.
+   */
+  integrate(issue: NormalizedIssue): Promise<IntegrateResult>;
   cleanup(issue: NormalizedIssue): Promise<void>;
 }
 
@@ -61,7 +81,8 @@ export class WorkspaceManager implements IWorkspaceManager {
     const wsPath = assertUnderRoot(candidate, this.workspace.root);
     const branch = this.branchFor(issue);
 
-    const { created } = await addWorktree(this.shared, wsPath, branch, this.shared.defaultBranch);
+    const base = this.workspace.base_branch ?? this.shared.defaultBranch;
+    const { created } = await addWorktree(this.shared, wsPath, branch, base);
 
     if (created) {
       const outcome = await runHook(this.hooks, 'after_create', {
@@ -87,6 +108,22 @@ export class WorkspaceManager implements IWorkspaceManager {
       cwd: ws.path,
       env: this.hookEnv(issue, ws.path, ws.branch),
     });
+  }
+
+  /** Merge the issue's branch into the base branch (skipped when merge_on_accept is off). */
+  async integrate(issue: NormalizedIssue): Promise<IntegrateResult> {
+    if (!this.shared || !this.workspace.merge_on_accept) return { merged: false };
+    const base = this.workspace.base_branch ?? this.shared.defaultBranch;
+    const branch = this.branchFor(issue);
+    const r = await mergeIntoBase(this.shared, branch, base);
+    if (r.conflict) {
+      return {
+        merged: false,
+        conflict: true,
+        reason: `merge conflict merging ${branch} into ${base}`,
+      };
+    }
+    return { merged: r.merged };
   }
 
   /** Remove the worktree for a terminal issue (branch preserved). */

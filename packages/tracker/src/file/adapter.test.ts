@@ -11,25 +11,37 @@ import {
 import { FileTracker, type FileTrackerOptions, seedStates } from './adapter.js';
 
 describe('seedStates', () => {
-  it('orders active → review → terminal with inferred types and no dupes', () => {
-    const states = seedStates(['Todo', 'In Progress'], 'Human Review', ['Done', 'Cancelled']);
+  it('orders backlog → active → review → terminal with inferred types and no dupes', () => {
+    const states = seedStates('Backlog', ['Todo', 'In Progress'], 'Human Review', [
+      'Done',
+      'Cancelled',
+    ]);
     expect(states.map((s) => s.name)).toEqual([
+      'Backlog',
       'Todo',
       'In Progress',
       'Human Review',
       'Done',
       'Cancelled',
     ]);
+    expect(states.find((s) => s.name === 'Backlog')?.type).toBe('backlog');
     expect(states.find((s) => s.name === 'Todo')?.type).toBe('unstarted');
     expect(states.find((s) => s.name === 'In Progress')?.type).toBe('started');
     expect(states.find((s) => s.name === 'Human Review')?.type).toBe('started');
     expect(states.find((s) => s.name === 'Done')?.type).toBe('completed');
     expect(states.find((s) => s.name === 'Cancelled')?.type).toBe('canceled');
-    expect(states.map((s) => s.position)).toEqual([0, 1, 2, 3, 4]);
+    expect(states.map((s) => s.position)).toEqual([0, 1, 2, 3, 4, 5]);
+  });
+
+  it('skips an empty/undefined backlog or review name', () => {
+    expect(seedStates('', ['Todo'], undefined, ['Done']).map((s) => s.name)).toEqual([
+      'Todo',
+      'Done',
+    ]);
   });
 
   it('dedupes a state listed twice', () => {
-    expect(seedStates(['Todo'], 'Todo', ['Todo']).map((s) => s.name)).toEqual(['Todo']);
+    expect(seedStates(undefined, ['Todo'], 'Todo', ['Todo']).map((s) => s.name)).toEqual(['Todo']);
   });
 });
 
@@ -60,6 +72,34 @@ describe('FileTracker', () => {
     expect(supportsIssueWriter(t)).toBe(true);
     expect(supportsActivity(t)).toBe(true);
     expect(t.kind).toBe('file');
+  });
+
+  it('additively adds a newly-configured Backlog lane to an existing project (leftmost, idempotent)', async () => {
+    // A project first created without a Backlog state.
+    const before = await make().listWorkflowStates();
+    expect(before.map((s) => s.name)).toEqual([
+      'Todo',
+      'In Progress',
+      'Human Review',
+      'Done',
+      'Cancelled',
+    ]);
+    // A later run configures backlogState: ensureSeedStates merges Backlog in at the front,
+    // preserving existing entries + order and reindexing positions.
+    const after = await make({ backlogState: 'Backlog' }).listWorkflowStates();
+    expect(after.map((s) => s.name)).toEqual([
+      'Backlog',
+      'Todo',
+      'In Progress',
+      'Human Review',
+      'Done',
+      'Cancelled',
+    ]);
+    expect(after.find((s) => s.name === 'Backlog')?.type).toBe('backlog');
+    expect(after.map((s) => s.position)).toEqual([0, 1, 2, 3, 4, 5]);
+    // Idempotent — a third run does not duplicate.
+    const again = await make({ backlogState: 'Backlog' }).listWorkflowStates();
+    expect(again.filter((s) => s.name === 'Backlog')).toHaveLength(1);
   });
 
   it('creates issues with prefixed ids, embedded attachments, and real timestamps', async () => {

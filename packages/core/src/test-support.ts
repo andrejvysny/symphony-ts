@@ -30,6 +30,8 @@ export function testConfig(overrides: Record<string, unknown> = {}): SymphonyCon
   const raw = {
     tracker: { kind: 'memory', ...((overrides['tracker'] as object) ?? {}) },
     workspace: {
+      // Default tests to worktree mode (multi-agent concurrency); single_dir tests override this.
+      mode: 'worktree',
       repo: '/tmp/fake-repo',
       root: '/tmp/fake-ws',
       ...((overrides['workspace'] as object) ?? {}),
@@ -48,6 +50,9 @@ export function testConfig(overrides: Record<string, unknown> = {}): SymphonyCon
 export class FakeWorkspaceManager implements IWorkspaceManager {
   readonly created: string[] = [];
   readonly cleaned: string[] = [];
+  readonly integrated: string[] = [];
+  /** Override to exercise the merge-conflict path. */
+  integrateResult: { merged: boolean; conflict?: boolean; reason?: string } = { merged: true };
   initCount = 0;
 
   async init(): Promise<void> {
@@ -66,6 +71,12 @@ export class FakeWorkspaceManager implements IWorkspaceManager {
   }
   async runAfterRun() {
     return { ran: false, ok: true } as const;
+  }
+  async integrate(
+    issue: NormalizedIssue,
+  ): Promise<{ merged: boolean; conflict?: boolean; reason?: string }> {
+    this.integrated.push(issue.id);
+    return this.integrateResult;
   }
   async cleanup(issue: NormalizedIssue): Promise<void> {
     this.cleaned.push(issue.id);

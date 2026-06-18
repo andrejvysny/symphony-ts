@@ -8,10 +8,19 @@ tracker:
   # Active project key: a slug naming its directory under <data_root>/projects/. Defaults to "default".
   project_id: default
   # Symphony custom flow. The agent may set active_states + review_state (never terminal).
-  active_states: [Todo, In Progress, Rework, Merging]
-  terminal_states: [Done, Cancelled]
+  # Board lanes: Backlog · Todo · In Progress · Human Review · Done. "Rework" is no longer a state —
+  # the review "Rework" action sends a ticket back to In Progress with a `rework` badge. Cancelled is
+  # a terminal state for classification but is hidden from the board.
+  active_states: [Todo, In Progress]
+  terminal_states: [Done, Closed, Canceled, Cancelled, Duplicate]
   # Non-active, non-terminal "park" state: the agent moves a finished issue here for a human.
   review_state: Human Review
+  # Leftmost, non-active "not yet ready" lane (human-only — the orchestrator never dispatches it).
+  # Seeded into new projects and additively added to existing ones. Set to '' to disable.
+  backlog_state: Backlog
+  # The orchestrator moves an issue here the instant an agent picks it up from the entry lane (the
+  # first active state), so the board shows work-in-progress immediately. Must be active; '' disables.
+  in_progress_state: In Progress
 
 # Switchable projects for the dashboard's project switcher. The ACTIVE project is whichever
 # project_id/repo sit in `tracker`/`workspace` above; this registry is the set you can switch to
@@ -28,10 +37,20 @@ polling:
   interval_ms: 5000
 
 workspace:
-  # Single shared repo (local path or git URL); every ticket gets a worktree off it.
-  repo: git@github.com:your-org/your-repo.git
+  # single_dir (default): the agent works DIRECTLY in `repo` on its current branch, ONE task at a
+  # time, so tasks build on each other (commits land on e.g. master). `repo` must be a LOCAL path.
+  # worktree: each ticket gets an isolated worktree branched off `base_branch`, merged back on accept.
+  mode: single_dir
+  # The project repo. single_dir: a local path the agent edits. worktree: local path or git URL.
+  repo: ~/code/your-repo
+  # worktree mode only: where shared clone + per-issue worktrees live; and the branch naming prefix.
   root: ~/code/symphony-workspaces
   branch_prefix: "symphony/"
+  # worktree mode only: branch new worktrees off this branch (defaults to the clone's default branch).
+  # base_branch: main
+  # worktree mode only: on accept (review → Done) merge the issue branch into base_branch so the next
+  # worktree builds on top. On conflict the branch is preserved and a banner surfaces it. Default true.
+  merge_on_accept: true
 
 hooks:
   # Runs once per new worktree. Install deps here.

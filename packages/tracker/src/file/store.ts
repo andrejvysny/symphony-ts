@@ -173,6 +173,46 @@ export class FileStore {
     );
     await this.writeIfAbsent(this.statesFile, JSON.stringify(this.seed.states, null, 2));
     await this.writeIfAbsent(this.labelsFile, JSON.stringify(this.seed.labels ?? [], null, 2));
+    await this.ensureSeedStates();
+  }
+
+  /**
+   * Additively reconcile states.json with the seeded state set so a newly-added lane (e.g. Backlog)
+   * appears in already-created projects too. Preserves every existing entry, its data, and order;
+   * inserts each missing seed state at its seed-order position (Backlog at index 0 → leftmost);
+   * never removes operator-added states. Reassigns `position` to the array index. Idempotent — a
+   * no-op once nothing is missing.
+   */
+  private async ensureSeedStates(): Promise<void> {
+    const seed = this.seed.states;
+    if (seed.length === 0) return;
+    await withFileLock(this.statesFile, async () => {
+      const existing = (await this.readJson(this.statesFile, z.array(workflowStateSchema))) ?? [];
+      const have = new Set(existing.map((s) => s.name));
+      const missing = seed.filter((s) => !have.has(s.name));
+      if (missing.length === 0) return;
+      const seedIdx = (name: string): number => seed.findIndex((s) => s.name === name);
+      const result: WorkflowStateInfo[] = existing.map((s) => ({
+        id: s.id,
+        name: s.name,
+        type: s.type,
+        position: s.position,
+        ...(s.color !== undefined ? { color: s.color } : {}),
+      }));
+      // Insert each missing seed state before the first existing state that follows it in seed order
+      // (so Backlog, seed index 0, lands leftmost); append when no later seed-known state is present.
+      for (const ms of missing) {
+        const msIdx = seedIdx(ms.name);
+        const at = result.findIndex((r) => {
+          const ri = seedIdx(r.name);
+          return ri !== -1 && ri > msIdx;
+        });
+        if (at === -1) result.push(ms);
+        else result.splice(at, 0, ms);
+      }
+      const reindexed = result.map((s, i) => ({ ...s, position: i }));
+      await writeFileAtomic(this.statesFile, JSON.stringify(reindexed, null, 2));
+    });
   }
 
   /** Atomic create-if-absent via the `wx` flag (never clobbers operator/seed edits). */

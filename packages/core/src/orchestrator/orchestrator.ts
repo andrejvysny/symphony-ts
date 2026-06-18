@@ -6,7 +6,7 @@ import {
   type McpConfig,
 } from '@symphony/agent-backends';
 import type { ErrorCategory, NormalizedIssue } from '@symphony/shared';
-import type { Tracker } from '@symphony/tracker';
+import { type Tracker, supportsBoard, supportsIssueWriter } from '@symphony/tracker';
 import type { SymphonyConfig } from '../config/resolve.js';
 import { dispatchPreflight } from '../config/validate.js';
 import { type Logger, noopLogger } from '../observability/logger.js';
@@ -75,6 +75,13 @@ export class Orchestrator {
   private readonly paused = new Set<string>();
   /** Per-issue live-log subscribers (SSE). */
   private readonly logSubscribers = new Map<string, Set<(ev: AgentEvent) => void>>();
+  /** Global board/state-change subscribers (SSE) — notified after every settled mutation. */
+  private readonly boardSubscribers = new Set<() => void>();
+  /** Issues whose auto-merge on accept hit a conflict; surfaced to the operator until resolved. */
+  private readonly mergeFailures = new Map<
+    string,
+    { issue: NormalizedIssue; identifier: string; reason: string; at: number }
+  >();
   private queue: Promise<unknown> = Promise.resolve();
   private running = false;
   private stopping = false;
@@ -114,11 +121,44 @@ export class Orchestrator {
     this.config = next;
   }
 
+  /**
+   * Apply a settings change, rebuilding the workspace manager when the workspace mode/repo/root
+   * changed (single_dir ⇄ worktree needs a different manager class + a fresh init). Rebuilds only
+   * when idle: if agents are running the whole workspace change is deferred (config keeps the current
+   * workspace block) so the running manager never mismatches its mode — the persisted change applies
+   * on the next idle settings apply or a restart. Non-workspace settings always apply immediately.
+   */
+  async applySettings(next: SymphonyConfig): Promise<void> {
+    return this.enqueue(async () => {
+      const prev = this.config;
+      const wsChanged =
+        prev.workspace.mode !== next.workspace.mode ||
+        prev.workspace.repo !== next.workspace.repo ||
+        prev.workspace.root !== next.workspace.root;
+      if (wsChanged && this.state.running.size > 0) {
+        this.config = { ...next, workspace: prev.workspace };
+        this.logger.info({}, 'workspace settings change deferred until agents are idle');
+        return;
+      }
+      this.config = next;
+      if (wsChanged && this.workspaceManagerFactory) {
+        const mgr = this.workspaceManagerFactory(next);
+        await mgr.init();
+        this.workspaceManager = mgr;
+        this.logger.info(
+          { mode: next.workspace.mode },
+          'workspace manager rebuilt for settings change',
+        );
+      }
+    });
+  }
+
   // ---- public lifecycle ----
 
   start(): void {
     this.running = true;
     void this.enqueue(() => this.startupCleanup())
+      .then(() => this.enqueue(() => this.migrateDroppedStates()))
       .then(() => this.detectAgentBinary())
       .finally(() => this.scheduleTick(0));
   }
@@ -168,6 +208,36 @@ export class Orchestrator {
       }
     } catch (e) {
       this.logger.warn({ error: String(e) }, 'startup terminal cleanup failed; continuing');
+    }
+  }
+
+  /**
+   * One-time migration for the simplified workflow: issues left in a now-removed active lane
+   * ("Rework"/"Merging") are restated to the in-progress state so they aren't stranded in a hidden
+   * board lane (rework is now In Progress + a `rework` label). Best-effort; runs at startup + switch.
+   */
+  private async migrateDroppedStates(): Promise<void> {
+    const t = this.config.tracker;
+    const target = t.in_progress_state;
+    if (target === '' || !t.active_states.includes(target)) return;
+    const tracker = this.tracker;
+    if (!supportsBoard(tracker)) return;
+    if (!supportsIssueWriter(tracker)) return;
+    const known = new Set(
+      [t.backlog_state, ...t.active_states, t.review_state, ...t.terminal_states].filter(Boolean),
+    );
+    try {
+      for (const i of await tracker.fetchAllIssues()) {
+        if (/^(rework|merging)$/i.test(i.state) && !known.has(i.state)) {
+          await tracker.updateIssueState(i.id, target).catch(() => undefined);
+          this.logger.info(
+            { issue_id: i.id, issue_identifier: i.identifier, from: i.state, to: target },
+            'migrated dropped-state issue to in-progress',
+          );
+        }
+      }
+    } catch (e) {
+      this.logger.warn({ error: String(e) }, 'dropped-state migration failed; continuing');
     }
   }
 
@@ -294,6 +364,7 @@ export class Orchestrator {
       this.state.blocked.clear();
       this.stopIntents.clear();
       this.paused.clear();
+      this.mergeFailures.clear();
       this.state.totals = { inputTokens: 0, outputTokens: 0, totalTokens: 0, secondsRunning: 0 };
       this.state.rateLimits = null;
 
@@ -303,6 +374,7 @@ export class Orchestrator {
       this.mcpConfig = newMcp;
       this.config = next;
       await this.startupCleanup();
+      await this.migrateDroppedStates();
       this.logger.info(
         { project_id: next.tracker.project_id, repo: next.workspace.repo },
         'switched active project',
@@ -329,6 +401,24 @@ export class Orchestrator {
         if (s.size === 0) this.logSubscribers.delete(issueId);
       }
     };
+  }
+
+  /** Subscribe to global board/state changes (SSE). Returns unsubscribe. */
+  subscribeBoard(cb: () => void): () => void {
+    this.boardSubscribers.add(cb);
+    return () => {
+      this.boardSubscribers.delete(cb);
+    };
+  }
+
+  private emitBoardChanged(): void {
+    for (const cb of this.boardSubscribers) {
+      try {
+        cb();
+      } catch {
+        /* a dead subscriber must not break the others */
+      }
+    }
   }
 
   /** Snapshot of a session's buffered events. */
@@ -371,6 +461,12 @@ export class Orchestrator {
       max_turns: this.config.agent.max_turns,
       max_continuations: this.config.agent.max_continuations,
       stall_timeout_ms: this.config.agent.stall_timeout_ms,
+      active_states: this.config.tracker.active_states,
+      terminal_states: this.config.tracker.terminal_states,
+      review_state: this.config.tracker.review_state,
+      backlog_state: this.config.tracker.backlog_state,
+      in_progress_state: this.config.tracker.in_progress_state,
+      workspace_mode: this.config.workspace.mode,
     };
   }
 
@@ -378,9 +474,11 @@ export class Orchestrator {
 
   private enqueue<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.queue.then(fn, fn);
+    // Every mutation runs through enqueue; notify board subscribers once it settles so the dashboard
+    // refetches live (SSE) instead of waiting for its poll.
     this.queue = next.then(
-      () => undefined,
-      () => undefined,
+      () => this.emitBoardChanged(),
+      () => this.emitBoardChanged(),
     );
     return next;
   }
@@ -421,7 +519,7 @@ export class Orchestrator {
 
       for (const issue of sortForDispatch(candidates)) {
         if (this.availableSlots() <= 0) break;
-        if (this.shouldDispatch(issue)) this.dispatch(issue, 0);
+        if (this.shouldDispatch(issue)) await this.dispatch(issue, 0);
       }
     } finally {
       this.state.pollCheckInProgress = false;
@@ -432,7 +530,19 @@ export class Orchestrator {
     if (!this.reload) return;
     const next = this.reload();
     if (next) {
-      this.config = next.config;
+      // Workspace topology (mode/repo/root) is owned by applySettings/switchProject — a hot reload must
+      // not flip it out from under the live workspace manager (which a plain config swap won't rebuild).
+      // Other settings, and non-topology workspace fields, still apply live.
+      const prev = this.config.workspace;
+      const nw = next.config.workspace;
+      const topologyChanged =
+        prev.mode !== nw.mode || prev.repo !== nw.repo || prev.root !== nw.root;
+      this.config = topologyChanged
+        ? {
+            ...next.config,
+            workspace: { ...nw, mode: prev.mode, repo: prev.repo, root: prev.root },
+          }
+        : next.config;
       this.promptBuilder = new PromptBuilder(next.promptBody);
     }
   }
@@ -440,6 +550,8 @@ export class Orchestrator {
   // ---- dispatch decisions ----
 
   private availableSlots(): number {
+    // single_dir mode runs ONE task at a time (the agent works directly in the project dir).
+    if (this.config.workspace.mode === 'single_dir') return this.state.running.size > 0 ? 0 : 1;
     return Math.max(this.config.agent.max_concurrent_agents - this.state.running.size, 0);
   }
 
@@ -469,7 +581,42 @@ export class Orchestrator {
     return true;
   }
 
-  private dispatch(issue: NormalizedIssue, attempt: number): void {
+  /**
+   * On a fresh pickup from the entry lane, immediately move the issue to the configured in-progress
+   * state so the board reflects that an agent is working (instead of the card lingering in the entry
+   * lane until the agent moves it). Awaited (the orchestrator is the single file writer, so this
+   * serializes with the agent's later writes) so the board-changed event fires only after the write
+   * lands and the dashboard refetches the in-progress state. Scoped to the entry state only — never
+   * stomps agent-advanced states on continuations/restarts. If the write fails, the local view
+   * self-corrects on the next reconcile and the agent still moves the issue itself.
+   */
+  private async markInProgressOnPickup(issue: NormalizedIssue, entry: RunningEntry): Promise<void> {
+    const t = this.config.tracker;
+    const target = t.in_progress_state;
+    const entryState = t.active_states[0];
+    if (
+      target === '' ||
+      entryState === undefined ||
+      issue.state !== entryState ||
+      issue.state === target ||
+      !t.active_states.includes(target)
+    )
+      return;
+    if (!supportsIssueWriter(this.tracker)) return;
+    const tracker = this.tracker;
+    // Reflect locally first so per-state counting + reconcile see the in-progress state immediately.
+    entry.issue.state = target;
+    try {
+      await tracker.updateIssueState(issue.id, target);
+    } catch (e: unknown) {
+      this.logger.warn(
+        { issue_id: issue.id, issue_identifier: issue.identifier, error: String(e) },
+        'auto-move to in-progress on pickup failed; agent will move it instead',
+      );
+    }
+  }
+
+  private async dispatch(issue: NormalizedIssue, attempt: number): Promise<void> {
     const entry = newRunningEntry(issue, attempt, this.now());
     this.state.running.set(issue.id, entry);
     this.state.claimed.add(issue.id);
@@ -479,6 +626,7 @@ export class Orchestrator {
     if (attempt === 0) this.state.continuations.delete(issue.id);
     // attempt 0 starts cold; re-dispatches (continuation / failure retry) resume the carried session.
     if (attempt === 0) this.state.resumeSessions.delete(issue.id);
+    if (attempt === 0) await this.markInProgressOnPickup(issue, entry);
     const resumeSessionId = attempt > 0 ? this.state.resumeSessions.get(issue.id) : undefined;
 
     const log = this.logger.child({ issue_id: issue.id, issue_identifier: issue.identifier });
@@ -562,8 +710,8 @@ export class Orchestrator {
         this.state.claimed.delete(issueId);
         this.state.continuations.delete(issueId);
         this.state.resumeSessions.delete(issueId);
-        await this.workspaceManager.cleanup(entry.issue).catch(() => undefined);
-        log.info({}, 'stopped: terminal state; workspace cleaned');
+        await this.finalizeTerminal(entry.issue);
+        log.info({}, 'stopped: terminal state; workspace finalized');
       } else if (intent === 'nonactive') {
         this.state.claimed.delete(issueId);
         this.state.continuations.delete(issueId);
@@ -611,8 +759,8 @@ export class Orchestrator {
             this.state.claimed.delete(issueId);
             this.state.continuations.delete(issueId);
             this.state.resumeSessions.delete(issueId);
-            await this.workspaceManager.cleanup(entry.issue).catch(() => undefined);
-            log.info({}, 'turn completed; issue terminal, workspace cleaned');
+            await this.finalizeTerminal(entry.issue);
+            log.info({}, 'turn completed; issue terminal, workspace finalized');
             return;
           case 'nonactive':
             this.state.claimed.delete(issueId);
@@ -771,7 +919,7 @@ export class Orchestrator {
       return;
     }
     if (this.availableSlots() > 0) {
-      this.dispatch(fresh, r.attempt);
+      await this.dispatch(fresh, r.attempt);
     } else {
       this.scheduleRetry(fresh, r.attempt, 'failure', 'no available orchestrator slots');
     }
@@ -849,10 +997,88 @@ export class Orchestrator {
       if (!ref || (!active.has(ref.state) && !terminal.has(ref.state)) || terminal.has(ref.state)) {
         this.state.blocked.delete(id);
         this.state.claimed.delete(id);
-        if (ref && terminal.has(ref.state))
-          await this.workspaceManager.cleanup(entry.issue).catch(() => undefined);
+        if (ref && terminal.has(ref.state)) await this.finalizeTerminal(entry.issue, ref.state);
       }
     }
+  }
+
+  // ---- terminal integration (merge-on-accept) ----
+
+  /** Cancel-type terminals (Cancelled/Canceled/Duplicate) are discarded, never merged. */
+  private isCancelState(name: string): boolean {
+    return /cancel|duplicate/i.test(name);
+  }
+
+  /**
+   * Integrate + clean up an issue that reached a terminal state. Completed-type terminals (Done/
+   * Closed) merge the issue's work into the base branch first so the next worktree builds on top;
+   * cancel-type (Discard) just clean up. On a merge conflict the work is preserved (worktree + branch
+   * kept) and surfaced via `mergeFailures` + a tracker comment. single_dir's integrate() is a no-op.
+   */
+  private async finalizeTerminal(
+    issue: NormalizedIssue,
+    terminalStateName?: string,
+  ): Promise<void> {
+    const log = this.logger.child({ issue_id: issue.id, issue_identifier: issue.identifier });
+    let stateName = terminalStateName;
+    if (stateName === undefined) {
+      const refs = await this.tracker.fetchIssueStatesByIds([issue.id]).catch(() => []);
+      stateName = refs.find((r) => r.id === issue.id)?.state;
+    }
+    if (stateName === undefined || !this.isCancelState(stateName)) {
+      let res: { merged: boolean; conflict?: boolean; reason?: string };
+      try {
+        res = await this.workspaceManager.integrate(issue);
+      } catch (e) {
+        res = { merged: false, conflict: true, reason: String(e) };
+      }
+      if (res.conflict) {
+        const reason = res.reason ?? 'merge conflict on accept';
+        this.mergeFailures.set(issue.id, {
+          issue,
+          identifier: issue.identifier,
+          reason,
+          at: this.now(),
+        });
+        const tracker = this.tracker;
+        if (supportsIssueWriter(tracker)) {
+          await tracker
+            .addComment(
+              issue.id,
+              `⚠️ Auto-merge on accept failed: ${reason}. The branch is preserved — merge it manually.`,
+            )
+            .catch(() => undefined);
+        }
+        log.warn({ reason }, 'auto-merge on accept failed; branch + worktree preserved');
+        return; // keep the worktree + branch for manual resolution
+      }
+      this.mergeFailures.delete(issue.id);
+      if (res.merged) log.info({}, 'merged issue branch into base on accept');
+    }
+    await this.workspaceManager.cleanup(issue).catch(() => undefined);
+  }
+
+  /**
+   * Finalize an operator state change made directly via the dashboard (e.g. Accept moves a parked
+   * review ticket to Done). Reconcile loops only see tracked issues, so a terminal move on an
+   * untracked issue (not running/claimed/blocked) is integrated + cleaned up here. Tracked issues are
+   * finalized by their normal exit/reconcile path, so skip them to avoid double-work.
+   */
+  async onExternalMove(issueId: string): Promise<void> {
+    return this.enqueue(async () => {
+      if (
+        this.state.running.has(issueId) ||
+        this.state.claimed.has(issueId) ||
+        this.state.blocked.has(issueId)
+      )
+        return;
+      const tracker = this.tracker;
+      if (!supportsBoard(tracker)) return;
+      const terminal = new Set(this.config.tracker.terminal_states);
+      const issue = (await tracker.fetchAllIssues().catch(() => [])).find((i) => i.id === issueId);
+      if (!issue || !terminal.has(issue.state)) return;
+      await this.finalizeTerminal(issue, issue.state);
+    });
   }
 
   // ---- observability ----
@@ -897,6 +1123,12 @@ export class Orchestrator {
         delay_type: r.delayType,
         due_at: new Date(r.dueAtMs).toISOString(),
         error: r.error ?? null,
+      })),
+      merge_failures: [...this.mergeFailures.values()].map((m) => ({
+        issue_id: m.issue.id,
+        issue_identifier: m.identifier,
+        reason: m.reason,
+        at: new Date(m.at).toISOString(),
       })),
       codex_totals: {
         input_tokens: this.state.totals.inputTokens,
@@ -954,6 +1186,17 @@ export interface RuntimeInfo {
   max_turns: number;
   max_continuations: number;
   stall_timeout_ms: number;
+  /** Workflow state classification (state names) so the dashboard can resolve review/rework/terminal
+   *  targets and gate the review-actions UI without hardcoding state names. */
+  active_states: string[];
+  terminal_states: string[];
+  review_state: string;
+  /** Leftmost non-active lane (e.g. "Backlog"); used to derive the board's visible lane set. */
+  backlog_state: string;
+  /** State an issue moves to on pickup (e.g. "In Progress"); the rework action also targets it. */
+  in_progress_state: string;
+  /** Active workspace mode (`single_dir` | `worktree`) for the settings toggle + board hints. */
+  workspace_mode: string;
 }
 
 function summarizeActionArg(input: unknown): string | undefined {

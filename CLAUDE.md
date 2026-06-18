@@ -81,17 +81,33 @@ behind one `CodingAgentBackend` interface — Claude Agent SDK and a CLI stream-
 
 ## Invariants (do not break)
 
-- Agent cwd must equal the worktree path; worktree must stay under `workspace.root` (path-safety).
-- Tracker is read-only from the orchestrator — the agent moves tickets via the semantic tracker tools
-  (`tracker_get_task`/`tracker_update_status`/`tracker_add_comment`). The agent may only set active +
-  `review_state`, never a terminal state. CLI-backend writes funnel through the orchestrator's bridge.
+- **Workspace mode** (`workspace.mode`, default `single_dir`): `single_dir` runs the agent directly in
+  `workspace.repo` (a local path) on its current branch, ONE task at a time (the orchestrator clamps
+  `availableSlots` to 1), so tasks build on each other; `cleanup`/`integrate` are no-ops and there are no
+  worktrees. `worktree` keeps the shared-clone + per-issue-worktree model. The factory
+  (`runtime.buildWorkspaceManager`) picks the manager; `SingleDirWorkspaceManager` vs `WorkspaceManager`
+  both implement `IWorkspaceManager` (+ `integrate`).
+- Agent cwd must equal the workspace path; in `worktree` mode it must stay under `workspace.root`
+  (path-safety). In `single_dir` mode the workspace IS the repo toplevel (intended; `assertUnderRoot`
+  is not applied there).
+- The orchestrator is **mostly** read-only on the tracker — the agent moves tickets via the semantic
+  tracker tools and may only set active + `review_state`, never a terminal state. The orchestrator
+  itself writes the tracker in three narrow spots: `markInProgressOnPickup` (entry-lane → In Progress on
+  dispatch, awaited), `finalizeTerminal` (worktree-mode merge-on-accept comment), and
+  `migrateDroppedStates` (one-time Rework/Merging → In Progress). CLI-backend writes funnel through the
+  orchestrator's bridge.
 - The file store keeps state id === state name; `blockedBy` is always `[]` (auto-skip disabled). The
   orchestrator's active/terminal classification comes from `config.tracker.{active,terminal}_states`
   (state **names**); `states.json` is display-only (lane order + type/color) and tolerates drift (an
   issue in a state missing from it still gets a board lane).
 - Token accounting uses absolute totals only (delta = max(0, next − lastReported)).
-- Workspaces/branches are preserved after success; cleaned only when the issue goes terminal. A
-  turn that ends with the issue already terminal is cleaned up immediately (no continuation).
+- Worktree-mode workspaces/branches are preserved after success; on a terminal transition the
+  orchestrator runs `finalizeTerminal` — for a **completed** terminal (Done/Closed) it merges the issue
+  branch into `base_branch` (when `merge_on_accept`) so the next worktree builds on top, then cleans up;
+  a **cancel** terminal (Cancelled/Duplicate) cleans up without merging; a merge **conflict** preserves
+  the branch and surfaces a `merge_failures` banner. The Accept path for a parked-review ticket triggers
+  this via `Orchestrator.onExternalMove` (the reconcile loops only see tracked issues). `single_dir`
+  cleanup is a no-op (never delete the project dir).
 - Continuation re-dispatch is bounded by `agent.max_continuations` (default 50, `0` = unlimited):
   after that many consecutive continuations without reaching a terminal state, the issue is moved to
   `blocked` for operator input instead of looping (prevents runaway token spend).

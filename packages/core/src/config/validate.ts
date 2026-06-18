@@ -1,4 +1,4 @@
-import type { SymphonyConfig } from './resolve.js';
+import { isRemoteRepo, type SymphonyConfig } from './resolve.js';
 
 export interface PreflightResult {
   ok: boolean;
@@ -25,6 +25,8 @@ export function dispatchPreflight(
     errors.push(`tracker.kind "${tracker.kind}" is not supported`);
 
   if (!workspace.repo) errors.push('workspace.repo is required (local path or git URL)');
+  else if (workspace.mode === 'single_dir' && isRemoteRepo(workspace.repo))
+    errors.push('single_dir mode requires a local workspace.repo path (not a git URL)');
 
   if (detection && !detection.found) {
     errors.push(`agent binary "${detection.binary}" not found on PATH`);

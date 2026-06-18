@@ -310,6 +310,28 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
     req.raw.on('close', unsubscribe);
   });
 
+  // ---- live board/state changes (SSE) ----
+  // A single global stream: pushes a lightweight `board_changed` tick after every settled orchestrator
+  // mutation so the client refetches board/state/sessions live (no poll lag).
+  app.get('/api/v1/events', (req, reply) => {
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+    });
+    reply.raw.write('event: open\ndata: {}\n\n');
+    const unsubscribe = source.subscribeBoard(() => {
+      reply.raw.write('data: {"type":"board_changed"}\n\n');
+    });
+    // Heartbeat so idle proxies don't drop the stream.
+    const ping = setInterval(() => reply.raw.write(': ping\n\n'), 20_000);
+    req.raw.on('close', () => {
+      clearInterval(ping);
+      unsubscribe();
+    });
+  });
+
   // ---- refresh (rate-limited) ----
   let lastRefreshAt = 0;
   app.post('/api/v1/refresh', async (_req, reply) => {

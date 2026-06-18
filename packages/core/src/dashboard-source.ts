@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type { AgentEvent } from '@symphony/agent-backends';
 import {
@@ -13,6 +14,7 @@ import {
 } from '@symphony/tracker';
 import type { ProjectEntry } from './config/schema.js';
 import type { WorkflowStore } from './workflow/store.js';
+import { sanitizeIdentifier } from './workspace/path-safety.js';
 import type {
   Orchestrator,
   OrchestratorSnapshot,
@@ -71,6 +73,9 @@ export interface IssueDetailDTO {
   status: IssueStatus;
   activity: IssueActivityDTO[];
   comments: IssueCommentDTO[];
+  /** Absolute path of the issue's git worktree when it exists on disk (for "Open in VS Code");
+   *  null for issues that have never run (no worktree yet) or after terminal cleanup. */
+  worktree_path: string | null;
 }
 
 export interface BoardData {
@@ -140,7 +145,7 @@ export interface SettingsDTO {
     max_budget_usd: number | null;
   };
   polling: { interval_ms: number };
-  workspace: { branch_prefix: string };
+  workspace: { branch_prefix: string; mode: string; merge_on_accept: boolean };
 }
 
 export interface SettingsAgentPatch {
@@ -160,7 +165,7 @@ export interface SettingsAgentPatch {
 export interface SettingsPatch {
   agent?: SettingsAgentPatch;
   polling?: { interval_ms?: number };
-  workspace?: { branch_prefix?: string };
+  workspace?: { branch_prefix?: string; mode?: string; merge_on_accept?: boolean };
 }
 
 /** The capability surface the dashboard consumes. */
@@ -190,6 +195,8 @@ export interface DashboardSource {
   terminateAll(): Promise<{ terminated: number }>;
   unblock(issueId: string): Promise<{ unblocked: boolean }>;
   subscribeLogs(issueId: string, cb: (ev: AgentEvent) => void): () => void;
+  /** Subscribe to global board/state changes (SSE); fires after every settled orchestrator mutation. */
+  subscribeBoard(cb: () => void): () => void;
 }
 
 /** Turn a project name into a unique, path-safe project key (the on-disk directory name). */
@@ -242,6 +249,7 @@ export function buildDashboardSource(
     terminateAll: () => orchestrator.terminateAll(),
     unblock: (id) => orchestrator.unblock(id),
     subscribeLogs: (id, cb) => orchestrator.subscribeLogs(id, cb),
+    subscribeBoard: (cb) => orchestrator.subscribeBoard(cb),
 
     async listProjects(): Promise<ProjectsDTO> {
       const cfg = orchestrator.currentConfig();
@@ -325,7 +333,7 @@ export function buildDashboardSource(
         projectKey: key,
         seed: {
           identifier: input.identifier,
-          states: seedStates(t.active_states, t.review_state, t.terminal_states),
+          states: seedStates(t.backlog_state, t.active_states, t.review_state, t.terminal_states),
         },
       });
       const entry: ProjectEntry = {
@@ -367,7 +375,11 @@ export function buildDashboardSource(
           max_budget_usd: c.agent.max_budget_usd ?? null,
         },
         polling: { interval_ms: c.polling.interval_ms },
-        workspace: { branch_prefix: c.workspace.branch_prefix },
+        workspace: {
+          branch_prefix: c.workspace.branch_prefix,
+          mode: c.workspace.mode,
+          merge_on_accept: c.workspace.merge_on_accept,
+        },
       };
     },
 
@@ -386,13 +398,18 @@ export function buildDashboardSource(
           const polling = (raw['polling'] ??= {}) as Record<string, unknown>;
           polling['interval_ms'] = patch.polling.interval_ms;
         }
-        if (patch.workspace?.branch_prefix !== undefined) {
+        if (patch.workspace) {
           const workspace = (raw['workspace'] ??= {}) as Record<string, unknown>;
-          workspace['branch_prefix'] = patch.workspace.branch_prefix;
+          if (patch.workspace.branch_prefix !== undefined)
+            workspace['branch_prefix'] = patch.workspace.branch_prefix;
+          if (patch.workspace.mode !== undefined) workspace['mode'] = patch.workspace.mode;
+          if (patch.workspace.merge_on_accept !== undefined)
+            workspace['merge_on_accept'] = patch.workspace.merge_on_accept;
         }
       };
       const snap = await st.persist(mutate); // persist() validates (zod) before writing
-      orchestrator.applyConfig(snap.config); // apply immediately (no tracker rebuild)
+      // applySettings rebuilds the workspace manager when mode/repo/root change (single_dir ⇄ worktree).
+      await orchestrator.applySettings(snap.config);
     },
 
     async listStates(): Promise<BoardStateDTO[]> {
@@ -443,6 +460,14 @@ export function buildDashboardSource(
       const [activity, comments] = supportsActivity(tracker)
         ? await Promise.all([tracker.fetchActivity(id), tracker.fetchComments(id)])
         : [[], []];
+      // single_dir: the agent works in workspace.repo directly. worktree: mirrors
+      // WorkspaceManager.createForIssue (<workspace.root>/<sanitized identifier>). Surfaced only when
+      // the path exists so "Open in VS Code" hides for never-run tickets.
+      const wcfg = orchestrator.currentConfig().workspace;
+      const worktree =
+        wcfg.mode === 'single_dir'
+          ? (wcfg.repo ?? null)
+          : path.join(wcfg.root, sanitizeIdentifier(issue.identifier));
       return {
         id: issue.id,
         identifier: issue.identifier,
@@ -457,6 +482,7 @@ export function buildDashboardSource(
         status: statusOf(issue.id, orchestrator.snapshot()),
         activity,
         comments,
+        worktree_path: worktree && existsSync(worktree) ? worktree : null,
       };
     },
 
@@ -490,6 +516,9 @@ export function buildDashboardSource(
       if (!supportsIssueWriter(tracker)) throw new Error('tracker does not support state changes');
       await tracker.updateIssueState(issueId, stateId);
       orchestrator.resume(issueId);
+      // If the operator moved an untracked ticket to a terminal state (e.g. Accept → Done on a parked
+      // review ticket), integrate (worktree-mode merge) + clean up — reconcile only sees tracked issues.
+      await orchestrator.onExternalMove(issueId);
     },
 
     async updateIssue(issueId: string, edit: IssueEditInput): Promise<void> {
@@ -500,12 +529,11 @@ export function buildDashboardSource(
       if (edit.description !== undefined) patch.description = edit.description;
       if (edit.priority !== undefined) patch.priority = edit.priority;
       if (edit.labels !== undefined) {
-        // Resolve operator-supplied label names to ids; silently drop names with no match.
+        // Resolve operator-supplied label names to ids; keep unknown names as-is so new labels (e.g.
+        // the `rework` badge) persist — the file/memory stores use the label name as its id.
         const infos = supportsBoard(tracker) ? await tracker.listLabels() : [];
         const byName = new Map(infos.map((l) => [l.name.toLowerCase(), l.id]));
-        patch.labelIds = edit.labels
-          .map((n) => byName.get(n.toLowerCase()))
-          .filter((id): id is string => id !== undefined);
+        patch.labelIds = edit.labels.map((n) => byName.get(n.toLowerCase()) ?? n);
       }
       await tracker.updateIssue(issueId, patch);
     },

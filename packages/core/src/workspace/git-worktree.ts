@@ -89,3 +89,27 @@ export async function removeWorktree(shared: SharedRepo, worktreePath: string): 
     await shared.git.raw(['worktree', 'remove', '--force', worktreePath]);
   });
 }
+
+/**
+ * Merge `branch` into `baseRef` inside the shared clone (worktree-mode integration on accept), so the
+ * NEXT worktree — created off `baseRef` by name — builds on top. Returns whether it merged cleanly.
+ * On conflict (or any merge failure) the merge is aborted so `baseRef` stays clean and `branch` is
+ * preserved for manual resolution. Serialized on the shared-repo lock with worktree add/remove.
+ */
+export async function mergeIntoBase(
+  shared: SharedRepo,
+  branch: string,
+  baseRef: string,
+): Promise<{ merged: boolean; conflict: boolean }> {
+  return withLock(shared.dir, async () => {
+    if (!(await branchExists(shared.git, branch))) return { merged: false, conflict: false };
+    await shared.git.raw(['checkout', baseRef]);
+    try {
+      await shared.git.raw(['merge', '--no-ff', '-m', `Merge ${branch} into ${baseRef}`, branch]);
+      return { merged: true, conflict: false };
+    } catch {
+      await shared.git.raw(['merge', '--abort']).catch(() => undefined);
+      return { merged: false, conflict: true };
+    }
+  });
+}

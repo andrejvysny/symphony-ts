@@ -166,6 +166,22 @@ cat ~/.symphony/projects/default/issues/<IDENTIFIER>/comments.jsonl
   summary comment.
 - The branch `symphony/<IDENTIFIER>` holds the commit (local only — not pushed).
 
+## 7. Review the result (dashboard)
+
+Open a **Human Review** ticket on the board to get a review panel in the side rail:
+
+- **Accept** — moves the ticket to the terminal Done state. The orchestrator then cleans up the
+  worktree/branch on its next reconcile.
+- **Discard** — moves it to Cancelled (also terminal → cleaned up).
+- **Rework** — posts the **Notes** textarea (if filled) as a comment and sends the ticket back to the
+  active **Rework** state. The agent re-runs and sees the note via `tracker_get_task`.
+- **Open in VS Code** — a link in the side rail (`vscode://file…`) that opens the issue's worktree
+  folder. Shown only when the worktree still exists on disk.
+
+The **Backlog** lane (leftmost) holds tickets that aren't ready yet — the orchestrator never
+dispatches them. Drag a ticket to **Todo** when it's ready to be worked. The agent drawer (Agents
+tab → a running agent) can be **dragged wider** from its left edge (double-click the edge to reset).
+
 ## Troubleshooting / known gotchas
 
 | Symptom                            | Likely cause                                           | Fix                                                                                                                                                                                   |

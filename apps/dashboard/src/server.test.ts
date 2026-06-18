@@ -38,6 +38,7 @@ function seededSnapshot(): OrchestratorSnapshot {
         error: 'boom',
       },
     ],
+    merge_failures: [],
     codex_totals: { input_tokens: 100, output_tokens: 40, total_tokens: 140, seconds_running: 12 },
     rate_limits: null,
   };
@@ -55,6 +56,12 @@ function fakeSource(): DashboardSource {
       max_turns: 6,
       max_continuations: 50,
       stall_timeout_ms: 900_000,
+      active_states: ['Todo', 'In Progress'],
+      terminal_states: ['Done', 'Cancelled'],
+      review_state: 'Human Review',
+      backlog_state: 'Backlog',
+      in_progress_state: 'In Progress',
+      workspace_mode: 'single_dir',
     }),
     findIssue: (id) => snap.running.find((r) => r.issue_identifier === id) ?? null,
     requestRefresh: vi.fn().mockResolvedValue({ coalesced: false }),
@@ -96,7 +103,7 @@ function fakeSource(): DashboardSource {
         max_budget_usd: null,
       },
       polling: { interval_ms: 5000 },
-      workspace: { branch_prefix: 'symphony/' },
+      workspace: { branch_prefix: 'symphony/', mode: 'single_dir', merge_on_accept: true },
     }),
     updateSettings: vi.fn().mockResolvedValue(undefined),
     getBoard: vi.fn().mockResolvedValue({
@@ -153,6 +160,7 @@ function fakeSource(): DashboardSource {
     terminateAll: vi.fn().mockResolvedValue({ terminated: 2 }),
     unblock: vi.fn().mockResolvedValue({ unblocked: true }),
     subscribeLogs: vi.fn().mockReturnValue(() => {}),
+    subscribeBoard: vi.fn().mockReturnValue(() => {}),
   };
 }
 
@@ -216,6 +224,10 @@ describe('dashboard server', () => {
       max_turns: 6,
       max_continuations: 50,
       stall_timeout_ms: 900_000,
+      active_states: ['Todo', 'In Progress'],
+      terminal_states: ['Done', 'Cancelled'],
+      review_state: 'Human Review',
+      workspace_mode: 'single_dir',
     });
     expect((await app.inject({ method: 'POST', url: '/api/v1/meta' })).statusCode).toBe(405);
     expect((await app.inject({ method: 'PUT', url: '/api/v1/meta' })).statusCode).toBe(405);

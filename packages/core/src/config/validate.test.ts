@@ -30,6 +30,28 @@ describe('dispatchPreflight', () => {
     expect(noRepo.errors.join(' ')).toMatch(/workspace\.repo/);
   });
 
+  it('single_dir mode rejects a remote workspace.repo (worktree allows it)', () => {
+    const single = resolveConfig(
+      parseConfig({
+        tracker: { kind: 'file' },
+        workspace: { mode: 'single_dir', repo: 'git@github.com:o/r.git' },
+      }),
+      '/tmp',
+    );
+    const r = dispatchPreflight(single);
+    expect(r.ok).toBe(false);
+    expect(r.errors.join(' ')).toMatch(/single_dir/);
+
+    const worktree = resolveConfig(
+      parseConfig({
+        tracker: { kind: 'file' },
+        workspace: { mode: 'worktree', repo: 'git@github.com:o/r.git' },
+      }),
+      '/tmp',
+    );
+    expect(dispatchPreflight(worktree).ok).toBe(true);
+  });
+
   it('fails when the agent binary was not detected (D1)', () => {
     const cfg = build({ kind: 'memory' });
     const missing = dispatchPreflight(cfg, { found: false, binary: 'claude' });

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { api, type BoardIssueDTO, type RuntimeInfo, type SessionInfo } from './api.js';
-import { clock, dur, LiveDot, secondsSince } from './util.js';
+import { clock, dur, LiveDot, secondsSince, useDrawerWidth } from './util.js';
 
 interface LogLine {
   cls: string;
@@ -116,6 +116,7 @@ export function AgentDrawer(props: {
   const boxRef = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const { width, handleProps } = useDrawerWidth();
 
   useEffect(() => {
     if (boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight;
@@ -143,7 +144,8 @@ export function AgentDrawer(props: {
   };
 
   return (
-    <div class="drawer" data-test="agent-drawer">
+    <div class="drawer" data-test="agent-drawer" style={{ width: `${width}px` }}>
+      <div class="drawer-resize" data-test="drawer-resize" {...handleProps} />
       <div class="drawer-head">
         <div class="row">
           <div style="display:flex;align-items:center;gap:9px">

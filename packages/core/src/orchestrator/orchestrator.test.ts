@@ -82,6 +82,43 @@ describe('Orchestrator', () => {
     expect(orchestrator.snapshot().counts.retrying).toBe(0);
   });
 
+  it('moves a freshly picked-up entry-lane issue to In Progress immediately', async () => {
+    const backend = new MockBackend([{ status: 'success' }]);
+    const { orchestrator, tracker } = setup({
+      issues: [makeIssue({ id: '1', state: 'Todo' })],
+      backend,
+    });
+
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+
+    // The orchestrator pre-moves Todo → In Progress on pickup so the board shows work immediately.
+    const issue = (await tracker.fetchAllIssues()).find((i) => i.id === '1');
+    expect(issue?.state).toBe('In Progress');
+  });
+
+  it('does not auto-move a non-entry active state (Rework) on pickup', async () => {
+    const backend = new MockBackend([{ status: 'success' }]);
+    const { orchestrator, tracker } = setup({
+      issues: [makeIssue({ id: '9', state: 'Rework' })],
+      backend,
+      config: {
+        tracker: {
+          kind: 'memory',
+          active_states: ['Todo', 'In Progress', 'Rework'],
+          terminal_states: ['Done', 'Canceled'],
+        },
+      },
+    });
+
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+
+    // Only the entry lane auto-moves — agent-advanced states are never stomped.
+    const issue = (await tracker.fetchAllIssues()).find((i) => i.id === '9');
+    expect(issue?.state).toBe('Rework');
+  });
+
   it('moves an issue to blocked on input_required and releases it when terminal', async () => {
     const backend = new MockBackend([{ status: 'blocked', reason: 'need a decision' }]);
     const { orchestrator, tracker, wm } = setup({
@@ -693,5 +730,98 @@ describe('Orchestrator', () => {
     await o2.runOnce();
     await flush(o2);
     expect(live).toContain('turn_completed');
+  });
+
+  it('single_dir mode runs one task at a time (serial clamp)', async () => {
+    const backend = new GatedBackend();
+    const { orchestrator } = setup({
+      issues: [makeIssue({ id: 'a', state: 'Todo' }), makeIssue({ id: 'b', state: 'Todo' })],
+      backend,
+      // High max_concurrent_agents, but single_dir clamps to 1.
+      config: {
+        agent: { max_turns: 1, stall_timeout_ms: 0, max_concurrent_agents: 10 },
+        workspace: { mode: 'single_dir', repo: '/tmp/fake-repo', root: '/tmp/fake-ws' },
+      },
+    });
+
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+    expect(orchestrator.snapshot().counts.running).toBe(1);
+    expect(backend.running).toBe(1);
+
+    backend.releaseAll();
+    await flush(orchestrator);
+    expect(orchestrator.snapshot().counts.running).toBe(0);
+  });
+
+  it('notifies board subscribers after a settled mutation', async () => {
+    const { orchestrator } = setup({
+      issues: [makeIssue({ id: '1', state: 'Todo' })],
+      backend: new MockBackend([{ status: 'success' }]),
+    });
+    let hits = 0;
+    const unsub = orchestrator.subscribeBoard(() => {
+      hits += 1;
+    });
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+    expect(hits).toBeGreaterThan(0);
+    unsub();
+    const before = hits;
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+    expect(hits).toBe(before); // unsubscribed → no more callbacks
+  });
+
+  it('merges the issue branch into base, then cleans up, when an issue is accepted', async () => {
+    const backend = new GatedBackend();
+    const { orchestrator, tracker, wm } = setup({
+      issues: [makeIssue({ id: '1', state: 'Todo' })],
+      backend,
+    });
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+    expect(orchestrator.snapshot().counts.running).toBe(1);
+
+    // Operator accepts: tracker state → Done. Next reconcile aborts + finalizes.
+    tracker.setState('1', 'Done');
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+    expect(wm.integrated).toContain('1'); // merged on accept
+    expect(wm.cleaned).toContain('1'); // then cleaned up
+  });
+
+  it('does not merge a discarded (cancelled) issue, but still cleans up', async () => {
+    const backend = new GatedBackend();
+    const { orchestrator, tracker, wm } = setup({
+      issues: [makeIssue({ id: '1', state: 'Todo' })],
+      backend,
+    });
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+
+    tracker.setState('1', 'Canceled');
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+    expect(wm.integrated).not.toContain('1'); // cancel-type → no merge
+    expect(wm.cleaned).toContain('1');
+  });
+
+  it('preserves the workspace + surfaces a merge failure on conflict', async () => {
+    const backend = new GatedBackend();
+    const { orchestrator, tracker, wm } = setup({
+      issues: [makeIssue({ id: '1', state: 'Todo' })],
+      backend,
+    });
+    wm.integrateResult = { merged: false, conflict: true, reason: 'merge conflict' };
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+
+    tracker.setState('1', 'Done');
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+    expect(wm.integrated).toContain('1');
+    expect(wm.cleaned).not.toContain('1'); // conflict → keep the branch + worktree
+    expect(orchestrator.snapshot().merge_failures.map((m) => m.issue_id)).toContain('1');
   });
 });

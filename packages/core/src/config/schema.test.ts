@@ -2,10 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { configSchema } from './schema.js';
 
 describe('config schema — agent/tracker prompt knobs', () => {
-  it('defaults tracker.kind to file and review_state to "Human Review"', () => {
+  it('defaults tracker.kind to file, review_state to "Human Review", backlog_state to "Backlog"', () => {
     const c = configSchema.parse({});
     expect(c.tracker.kind).toBe('file');
     expect(c.tracker.review_state).toBe('Human Review');
+    expect(c.tracker.backlog_state).toBe('Backlog');
+    expect(c.tracker.in_progress_state).toBe('In Progress');
+    // Backlog stays out of the active set so the orchestrator never dispatches it; the in-progress
+    // pickup target is an active state.
+    expect(c.tracker.active_states).not.toContain('Backlog');
+    expect(c.tracker.active_states).toContain('In Progress');
     // The prompt knobs are optional and unset by default.
     expect(c.agent.system_prompt).toBeUndefined();
     expect(c.agent.effort).toBeUndefined();

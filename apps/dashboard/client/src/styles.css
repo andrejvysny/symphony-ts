@@ -1,6 +1,8 @@
-/* Symphony dashboard — shadcn-style zinc dark. Tokens mirror the design spec:
+/* Symphony dashboard — shadcn-style zinc theme. Tokens mirror the design spec:
    zinc-950 canvas, zinc-900 surfaces, zinc-800 hairlines, white primary button.
-   Status is the only color (running green, blocked/retry amber, review blue). */
+   Status is the only color (running green, blocked/retry amber, review blue).
+   Dark is the default (:root); light is opt-in via :root[data-theme='light'],
+   set before first paint by the inline script in index.html. */
 :root {
   color-scheme: dark;
 
@@ -32,8 +34,76 @@
   --purple: #a78bfa;
   --rose: #fb7185;
 
+  /* structural tokens — abstract the dark literals so the light theme can flip them */
+  --on-primary: #18181b; /* text on the primary (inverse) button */
+  --blue-lane: #1b2433; /* review-lane border tint */
+  --amber-lane: #2a2418; /* blocked-lane border tint */
+  --blue-wash: #10131a; /* dragover / dropzone-hover wash */
+  --surface-sunken: #0a0a0d; /* ticket side rail + footer */
+  --surface-deep: #070709; /* tmux hint strip */
+  --border-modal: #2a2a30; /* modal / ticket / menu border */
+  --overlay-bg: rgba(0, 0, 0, 0.62); /* modal backdrop scrim */
+  --att-scrim: linear-gradient(
+    180deg,
+    rgba(9, 9, 11, 0),
+    rgba(9, 9, 11, 0.94)
+  ); /* image-name gradient */
+  --att-rm-bg: rgba(9, 9, 11, 0.72); /* attachment remove-button disc */
+  --on-scrim: #fafafa; /* text/icons over the dark image scrim (both themes) */
+  --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.6);
+  --shadow-menu: 0 12px 30px rgba(0, 0, 0, 0.45);
+  --shadow-drawer: -10px 0 40px rgba(0, 0, 0, 0.4);
+
   --mono: 'Geist Mono', ui-monospace, 'SF Mono', monospace;
   --sans: 'Geist', system-ui, -apple-system, sans-serif;
+}
+
+/* ---- light theme ---- overrides only the palette + structural tokens; every
+   rule below consumes these vars, so the whole UI flips without per-rule edits.
+   Mirrors the zinc scale inverted: white canvas, white cards raised over a
+   zinc-100 board, zinc-900 text. Status hues deepen to stay legible on light. */
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --canvas: #ffffff;
+  --board: #f4f4f5;
+  --surface: #ffffff;
+  --surface-2: #f4f4f5;
+  --hairline: #e4e4e7;
+  --hairline-2: #f0f0f1;
+  --border-strong: #d4d4d8;
+
+  --fg: #18181b;
+  --fg-1: #27272a;
+  --fg-2: #3f3f46;
+  --muted: #52525b;
+  --muted-2: #71717a;
+  --faint: #a1a1aa;
+  --faint-2: #d4d4d8;
+
+  --green: #059669;
+  --green-deep: #10b981;
+  --green-done: #16a34a;
+  --green-border: #a7f3d0;
+  --amber: #d97706;
+  --amber-deep: #d97706;
+  --orange: #ea580c;
+  --blue: #2563eb;
+  --blue-deep: #3b82f6;
+  --purple: #7c3aed;
+  --rose: #e11d48;
+
+  --on-primary: #fafafa;
+  --blue-lane: #bfdbfe;
+  --amber-lane: #fde68a;
+  --blue-wash: #eff6ff;
+  --surface-sunken: #fafafa;
+  --surface-deep: #f4f4f5;
+  --border-modal: #e4e4e7;
+  --overlay-bg: rgba(24, 24, 27, 0.45);
+  --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.18);
+  --shadow-menu: 0 12px 30px rgba(0, 0, 0, 0.12);
+  --shadow-drawer: -10px 0 40px rgba(0, 0, 0, 0.12);
 }
 
 * {
@@ -277,7 +347,7 @@ body {
 }
 .btn.primary {
   background: var(--fg);
-  color: #18181b;
+  color: var(--on-primary);
   border: none;
 }
 .btn.ghost {
@@ -394,14 +464,14 @@ body {
   border-color: var(--green-border);
 }
 .lane-body.review {
-  border-color: var(--blue-lane, #1b2433);
+  border-color: var(--blue-lane);
 }
 .lane-body.blocked {
-  border-color: #2a2418;
+  border-color: var(--amber-lane);
 }
 .lane-body.dragover {
   border-color: var(--blue);
-  background: #10131a;
+  background: var(--blue-wash);
 }
 .lane-body.empty-pad {
   align-items: center;
@@ -548,6 +618,17 @@ body {
   color: var(--muted);
   background: var(--hairline);
 }
+.pill.rework {
+  color: var(--orange);
+  background: rgba(251, 146, 60, 0.14);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.card-top-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 
 /* action line (terminal echo) */
 .action {
@@ -611,7 +692,7 @@ body {
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.62);
+  background: var(--overlay-bg);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -619,7 +700,7 @@ body {
 }
 .modal {
   background: var(--board);
-  border: 1px solid #2a2a30;
+  border: 1px solid var(--border-modal);
   border-radius: 12px;
   padding: 20px;
   width: 480px;
@@ -695,7 +776,7 @@ textarea {
 .dropzone:hover,
 .dropzone.over {
   border-color: var(--blue);
-  background: #10131a;
+  background: var(--blue-wash);
 }
 .dropzone .ic {
   width: 30px;
@@ -734,9 +815,9 @@ textarea {
   right: 0;
   bottom: 0;
   padding: 7px 9px;
-  background: linear-gradient(180deg, rgba(9, 9, 11, 0), rgba(9, 9, 11, 0.94));
+  background: var(--att-scrim);
   font-size: 11px;
-  color: var(--fg);
+  color: var(--on-scrim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -754,8 +835,8 @@ textarea {
   height: 22px;
   border-radius: 6px;
   border: none;
-  background: rgba(9, 9, 11, 0.72);
-  color: var(--fg-1);
+  background: var(--att-rm-bg);
+  color: var(--on-scrim);
   font-size: 13px;
   cursor: pointer;
   padding: 0;
@@ -767,9 +848,9 @@ textarea {
   max-width: 96vw;
   max-height: 90vh;
   background: var(--board);
-  border: 1px solid #2a2a30;
+  border: 1px solid var(--border-modal);
   border-radius: 14px;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--shadow-modal);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -954,7 +1035,7 @@ textarea {
   width: 296px;
   flex: none;
   border-left: 1px solid var(--hairline-2);
-  background: #0a0a0d;
+  background: var(--surface-sunken);
   padding: 20px;
   display: flex;
   flex-direction: column;
@@ -978,6 +1059,26 @@ textarea {
 .side-row .v.blue {
   color: var(--blue);
 }
+
+/* human-review actions (ticket side panel) */
+.review-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.review-notes {
+  min-height: 64px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.review-btns {
+  display: flex;
+  gap: 6px;
+}
+.review-btns .btn {
+  flex: 1;
+  justify-content: center;
+}
 .hr {
   height: 1px;
   background: var(--hairline-2);
@@ -989,7 +1090,7 @@ textarea {
   justify-content: space-between;
   padding: 13px 20px;
   border-top: 1px solid var(--hairline-2);
-  background: #0a0a0d;
+  background: var(--surface-sunken);
 }
 
 /* inline-editable ticket fields */
@@ -1043,14 +1144,33 @@ textarea {
   top: 0;
   right: 0;
   height: 100vh;
-  width: 460px;
+  width: 460px; /* fallback; the component sets an inline width (drag-resizable, persisted) */
   max-width: 96vw;
   background: var(--board);
   border-left: 1px solid var(--hairline);
   z-index: 45;
   display: flex;
   flex-direction: column;
-  box-shadow: -10px 0 40px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow-drawer);
+}
+/* drag handle on the drawer's left edge (drawer is right-anchored) */
+.drawer-resize {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 6px;
+  height: 100%;
+  cursor: ew-resize;
+  z-index: 2;
+  touch-action: none;
+}
+.drawer-resize:hover,
+body.resizing-x .drawer-resize {
+  background: var(--border-strong);
+}
+body.resizing-x {
+  cursor: ew-resize;
+  user-select: none;
 }
 .drawer-head {
   flex: none;
@@ -1227,7 +1347,7 @@ textarea {
   font-family: var(--mono);
   font-size: 10.5px;
   color: var(--faint);
-  background: #070709;
+  background: var(--surface-deep);
 }
 .drawer-actions {
   flex: none;
@@ -1331,10 +1451,10 @@ textarea {
   z-index: 60;
   width: 280px;
   background: var(--board);
-  border: 1px solid #2a2a30;
+  border: 1px solid var(--border-modal);
   border-radius: 10px;
   padding: 6px;
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-menu);
 }
 .menu-head {
   font-size: 10.5px;

@@ -1,7 +1,13 @@
 import { z } from 'zod';
 
-/** Default workflow states for the Symphony custom flow (decision: custom states). */
-export const DEFAULT_ACTIVE_STATES = ['Todo', 'In Progress', 'Rework', 'Merging'];
+/**
+ * Default workflow states for the Symphony custom flow (decision: custom states).
+ * Lanes shown on the board: Backlog · Todo · In Progress · Human Review · Done. "Rework" and
+ * "Merging" are intentionally NOT states — rework is `In Progress` + a `rework` label badge, and
+ * merging is an orchestrator-side step on accept. Cancelled stays a terminal state for classification
+ * but is hidden from the board.
+ */
+export const DEFAULT_ACTIVE_STATES = ['Todo', 'In Progress'];
 export const DEFAULT_TERMINAL_STATES = ['Done', 'Closed', 'Canceled', 'Cancelled', 'Duplicate'];
 
 export const trackerSchema = z
@@ -16,6 +22,17 @@ export const trackerSchema = z
     terminal_states: z.array(z.string()).default(DEFAULT_TERMINAL_STATES),
     /** Non-active, non-terminal "park" state the agent moves an issue to for human review. */
     review_state: z.string().default('Human Review'),
+    /**
+     * Non-active, non-terminal lane (seeded leftmost) for tickets not yet ready to implement.
+     * Human-only — the orchestrator never dispatches it. Set to `''` to disable the lane.
+     */
+    backlog_state: z.string().default('Backlog'),
+    /**
+     * State an issue is moved to the instant an agent picks it up from the entry lane (the first
+     * active state), so the board shows work-in-progress immediately instead of the card lingering
+     * in Todo until the agent moves it. Must be an active state. Set to `''` to disable.
+     */
+    in_progress_state: z.string().default('In Progress'),
   })
   .strict();
 
@@ -41,13 +58,27 @@ export const pollingSchema = z
   })
   .strict();
 
+export const workspaceModes = ['single_dir', 'worktree'] as const;
+
 export const workspaceSchema = z
   .object({
-    /** Resolved to <os.tmpdir()>/symphony_workspaces when omitted (see resolve.ts). */
+    /**
+     * `single_dir` (default): run the agent directly in `repo`, one task at a time, committing on the
+     * repo's current branch so tasks build on each other. `worktree`: isolate each ticket in its own
+     * git worktree branched off `base_branch`, merged back on accept (see `merge_on_accept`).
+     */
+    mode: z.enum(workspaceModes).default('single_dir'),
+    /** Resolved to <os.tmpdir()>/symphony_workspaces when omitted (see resolve.ts). worktree mode only. */
     root: z.string().optional(),
-    /** Single shared repo (local path or git URL) every ticket worktrees off. */
+    /** The project repo. `single_dir`: a LOCAL path the agent edits directly. `worktree`: the repo
+     * (local path or git URL) every ticket worktrees off. */
     repo: z.string().optional(),
     branch_prefix: z.string().default('symphony/'),
+    /** worktree mode: branch new worktrees off this branch (defaults to the clone's default branch). */
+    base_branch: z.string().optional(),
+    /** worktree mode: on accept (review→Done), merge the issue branch into `base_branch` so the next
+     * worktree builds on top. Disable to keep branches isolated. */
+    merge_on_accept: z.boolean().default(true),
   })
   .strict();
 

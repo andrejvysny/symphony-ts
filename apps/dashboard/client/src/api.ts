@@ -47,6 +47,8 @@ export interface IssueDetailDTO {
   status: IssueStatus;
   activity: IssueActivityDTO[];
   comments: IssueCommentDTO[];
+  /** Absolute worktree path when it exists on disk (for "Open in VS Code"); null otherwise. */
+  worktree_path: string | null;
 }
 export interface SessionInfo {
   issue_id: string;
@@ -74,6 +76,13 @@ export interface RuntimeInfo {
   max_turns: number;
   max_continuations: number;
   stall_timeout_ms: number;
+  /** Workflow state classification (state names) for resolving review/rework/terminal targets. */
+  active_states: string[];
+  terminal_states: string[];
+  review_state: string;
+  backlog_state: string;
+  in_progress_state: string;
+  workspace_mode: string;
 }
 export interface LabelInfo {
   id: string;
@@ -100,6 +109,12 @@ export interface SnapshotRetry {
   due_at: string;
   error: string | null;
 }
+export interface SnapshotMergeFailure {
+  issue_id: string;
+  issue_identifier: string;
+  reason: string;
+  at: string;
+}
 export interface StateSnapshot {
   counts: {
     running: number;
@@ -112,6 +127,8 @@ export interface StateSnapshot {
   paused: string[];
   blocked: SnapshotBlocked[];
   retrying: SnapshotRetry[];
+  /** Issues whose auto-merge on accept hit a conflict (worktree mode); branch preserved. */
+  merge_failures?: SnapshotMergeFailure[];
 }
 
 export interface Capabilities {
@@ -149,12 +166,12 @@ export interface SettingsDTO {
     max_budget_usd: number | null;
   };
   polling: { interval_ms: number };
-  workspace: { branch_prefix: string };
+  workspace: { branch_prefix: string; mode: string; merge_on_accept: boolean };
 }
 export interface SettingsPatch {
   agent?: Partial<SettingsDTO['agent']>;
   polling?: { interval_ms?: number };
-  workspace?: { branch_prefix?: string };
+  workspace?: { branch_prefix?: string; mode?: string; merge_on_accept?: boolean };
 }
 
 async function jsonOrThrow<T>(res: Response): Promise<T> {
@@ -240,4 +257,6 @@ export const api = {
     ),
   logStream: (issueId: string) =>
     new EventSource(`/api/v1/sessions/${encodeURIComponent(issueId)}/logs`),
+  /** Global board/state change stream — pushes `{type:'board_changed'}` so the UI refetches live. */
+  eventStream: () => new EventSource('/api/v1/events'),
 };

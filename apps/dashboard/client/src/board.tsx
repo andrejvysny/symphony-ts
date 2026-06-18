@@ -28,10 +28,17 @@ export function Board(props: {
   onOpenAgent: (issueId: string) => void;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const lanes = props.board.states.filter((s) => !isTerminalState(s));
-  const terminals = props.board.states.filter(isTerminalState);
-  const collapsed = terminals.filter((s) => !expanded.has(s.id));
-  const openTerminals = terminals.filter((s) => expanded.has(s.id));
+  // Visible lanes = backlog + active + review (from runtime config). Done (completed) collapses to a
+  // rail; Cancelled — and any legacy non-lane state like Rework/Merging — is hidden from the board.
+  const meta = props.live.meta;
+  const laneNames = meta
+    ? new Set([meta.backlog_state, ...meta.active_states, meta.review_state].filter(Boolean))
+    : null;
+  const isLane = (s: BoardStateDTO) => (laneNames ? laneNames.has(s.name) : !isTerminalState(s));
+  const lanes = props.board.states.filter((s) => isLane(s) && !isTerminalState(s));
+  const rails = props.board.states.filter((s) => s.type === 'completed');
+  const collapsed = rails.filter((s) => !expanded.has(s.id));
+  const openTerminals = rails.filter((s) => expanded.has(s.id));
   const toggle = (id: string) =>
     setExpanded((e) => {
       const next = new Set(e);
@@ -211,7 +218,14 @@ function Card(props: {
     >
       <div class="card-top">
         <span class="card-id">{i.identifier}</span>
-        {i.status !== 'idle' && <StatusPill status={i.status} />}
+        <span class="card-top-right">
+          {i.labels.includes('rework') && (
+            <span class="pill rework" title="sent back for rework">
+              rework
+            </span>
+          )}
+          {i.status !== 'idle' && <StatusPill status={i.status} />}
+        </span>
       </div>
       <span class="card-title">{i.title}</span>
 
@@ -296,13 +310,15 @@ function CardMeta(props: { issue: BoardIssueDTO }) {
   const i = props.issue;
   const prio = priorityLabel(i.priority);
   const ts = i.updatedAt ?? i.createdAt;
-  if (!prio && i.labels.length === 0 && !ts) return null;
+  // `rework` is rendered as a prominent badge in card-top, not as a generic label chip.
+  const labels = i.labels.filter((l) => l !== 'rework');
+  if (!prio && labels.length === 0 && !ts) return null;
   return (
     <>
-      {(prio || i.labels.length > 0) && (
+      {(prio || labels.length > 0) && (
         <div class="chips">
           {prio && <span class="chip dim">{prio}</span>}
-          {i.labels.slice(0, 3).map((l) => (
+          {labels.slice(0, 3).map((l) => (
             <span class="chip dim" key={l}>
               {l}
             </span>

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -56,6 +56,33 @@ describe('buildDashboardSource (project/settings surface)', () => {
     const res = await build().listProjects();
     expect(res.projects).toEqual([]);
     expect(res.active_project_id).toBeNull();
+  });
+
+  it('getIssueDetail surfaces worktree_path only when the worktree dir exists', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'symphony-wt-'));
+    try {
+      const tracker = new MemoryTracker({ activeStates: ['Todo'], terminalStates: ['Done'] });
+      const issue = await tracker.createIssue({ title: 'x' });
+      const orchestrator = new Orchestrator({
+        tracker,
+        backend: new MockBackend([{ status: 'success' }]),
+        workspaceManager: new FakeWorkspaceManager(),
+        config: testConfig({
+          workspace: { root },
+          tracker: { kind: 'memory', active_states: ['Todo'], terminal_states: ['Done'] },
+        }),
+        promptBuilder: new PromptBuilder('do'),
+      });
+      const source = buildDashboardSource(orchestrator);
+      // No worktree on disk yet → null (button stays hidden for never-run tickets).
+      expect((await source.getIssueDetail(issue.id))?.worktree_path).toBeNull();
+      // Once the worktree dir exists, the absolute path is surfaced.
+      const wt = path.join(root, issue.identifier);
+      await mkdir(wt);
+      expect((await source.getIssueDetail(issue.id))?.worktree_path).toBe(wt);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 
