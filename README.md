@@ -56,6 +56,17 @@ node apps/cli/dist/main.js ./WORKFLOW.md --port 4500   # dashboard at http://127
 node apps/cli/dist/main.js ticket create "Add dark mode" --desc "..." --state Todo
 ```
 
+### Dev mode (watch)
+
+```bash
+pnpm dev   # rebuilds packages on change; runs the orchestrator + Vite dev server
+```
+
+Two URLs are served: **http://127.0.0.1:4500** is the orchestrator API plus the built SPA
+(production-style, no client hot-reload), and **http://localhost:5173** is the Vite HMR dev server
+for frontend work (it proxies `/api` — including the SSE streams — to :4500). Open **:5173** while
+editing `apps/dashboard/client`.
+
 Install the `symphony` command globally for convenience:
 
 ```bash

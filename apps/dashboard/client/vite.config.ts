@@ -12,7 +12,11 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
-    // `vite dev` proxies API calls to a running orchestrator dashboard.
+    // Pinned so the HMR dev URL is stable/announced (http://localhost:5173).
+    port: 5173,
+    strictPort: true,
+    // `vite dev` proxies API calls (incl. the /api/v1/events + logs SSE streams) to a
+    // running orchestrator dashboard on :4500.
     proxy: { '/api': 'http://127.0.0.1:4500' },
   },
 });

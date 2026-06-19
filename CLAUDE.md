@@ -22,6 +22,7 @@ behind one `CodingAgentBackend` interface — Claude Agent SDK and a CLI stream-
   `pnpm format` writes; `pnpm format:check` is the gate.
 - Single test file: `pnpm --filter @symphony/core exec vitest run src/orchestrator/orchestrator.test.ts`
 - Run it: `node apps/cli/dist/main.js ./WORKFLOW.md --port 4500` (after build), or `symphony ticket create "<title>" [--desc --state --priority]`. No services to start — state lives in `~/.symphony`.
+- `pnpm dev` — watch mode. Two URLs: **:4500** = orchestrator API + the built Preact SPA (production-style, no client HMR); **:5173** = Vite HMR dev server for frontend work (proxies `/api`, incl. SSE, to :4500). Open :5173 while editing `apps/dashboard/client`. (The dashboard's `dev` is `tsup --watch` with `clean:false` so it doesn't wipe the vite-built `dist/client`; `build` does an explicit `pnpm clean` first.)
 
 ## Architecture (the load-bearing parts)
 
