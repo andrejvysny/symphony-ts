@@ -1,14 +1,19 @@
 name: Publish
 
 # Publishes @andrejvysny/symphony to npm on a version tag (e.g. v0.1.1), using npm trusted publishing
-# (OIDC) — no NPM_TOKEN secret. Provenance attestations are generated automatically.
+# (OIDC) — no NPM_TOKEN secret. Provenance attestations are generated automatically under trusted
+# publishing, and a GitHub Release is cut for the tag.
 #
 # One-time setup before the first tag can publish via this workflow:
-#   1. Bootstrap-publish v0.1.0 manually (`pnpm release:publish` with `npm login`) so the package
+#   1. Bootstrap-publish v0.1.0 manually (`pnpm release:publish` after `npm login`) so the package
 #      exists on npm.
 #   2. On npmjs.com → @andrejvysny/symphony → Settings → Trusted Publisher → GitHub Actions:
 #      org `andrejvysny`, repo `symphony-ts`, workflow `publish.yml`.
-#   3. Bump apps/cli/package.json to the next version, then push a matching tag (vX.Y.Z).
+#
+# To cut a release (the tag MUST match apps/cli/package.json `version`, or the run fails fast):
+#   npm version --workspace @andrejvysny/symphony <X.Y.Z>   # bumps version + commits
+#   git push && git push --tags                             # or: git tag vX.Y.Z && git push origin vX.Y.Z
+# (Prereleases publish under the default `latest` dist-tag; add `--tag next` to release:pack to change.)
 
 on:
   push:
@@ -17,7 +22,7 @@ on:
 
 permissions:
   id-token: write # OIDC token for npm trusted publishing + provenance
-  contents: read
+  contents: write # create the GitHub Release for the tag
 
 jobs:
   publish:
@@ -35,6 +40,18 @@ jobs:
           cache: pnpm
           registry-url: https://registry.npmjs.org
 
+      # Fail fast unless the pushed tag (vX.Y.Z) matches the package version — prevents republishing a
+      # stale version or a tag/version mismatch before running the (slower) gates + publish.
+      - name: Verify tag matches package version
+        run: |
+          PKG_VERSION="$(node -p "require('./apps/cli/package.json').version")"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match apps/cli version $PKG_VERSION"
+            exit 1
+          fi
+          echo "publishing @andrejvysny/symphony@$PKG_VERSION"
+
       # Trusted publishing (OIDC) requires npm >= 11.5.1; Node 22 ships npm 10.
       - run: npm install -g npm@latest
 
@@ -49,3 +66,9 @@ jobs:
 
       # Strip workspace devDeps + maps and publish. OIDC supplies auth + provenance automatically.
       - run: pnpm release:pack
+
+      # Cut a GitHub Release for the tag with auto-generated notes (only after npm publish succeeds).
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
