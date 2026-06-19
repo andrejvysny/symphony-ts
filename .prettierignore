@@ -3,3 +3,6 @@ dist/
 pnpm-lock.yaml
 *.tsbuildinfo
 coverage/
+# AI-tool config dirs (Codex/Claude Code) — not project source; don't gate on their formatting.
+.codex/
+.claude/
