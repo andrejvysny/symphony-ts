@@ -77,10 +77,13 @@ describe('SingleDirWorkspaceManager (real git)', () => {
     );
   }, 30_000);
 
-  it('init throws when repo is not a git repository', async () => {
-    const nonRepo = path.join(tmp, 'plain');
-    await mkdir(nonRepo, { recursive: true });
-    const wm = new SingleDirWorkspaceManager(wsConfig(nonRepo), hooks);
-    await expect(wm.init()).rejects.toThrow(/not a git repository/);
+  it('provisions a git repo for a missing/plain folder (import a folder as a project)', async () => {
+    const fresh = path.join(tmp, 'imported'); // does not exist yet
+    const wm = new SingleDirWorkspaceManager(wsConfig(fresh), hooks);
+    await wm.init();
+    const ws = await wm.createForIssue(makeIssue({ id: '9', identifier: 'SD-9' }));
+    expect(ws.branch).toBe('main');
+    const log = await execa('git', ['-C', fresh, 'log', '--oneline'], { reject: false });
+    expect(log.stdout).toContain('Initial commit');
   }, 30_000);
 });

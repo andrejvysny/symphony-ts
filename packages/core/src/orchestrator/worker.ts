@@ -112,7 +112,7 @@ export async function runWorker(deps: WorkerDeps, ctx: WorkerContext): Promise<W
         if (ws.branch) contCtx.branch = ws.branch;
         const gs = await gitStatusSummary(ws.path);
         if (gs !== undefined) contCtx.gitStatus = gs;
-        prompt = promptBuilder.continuation(issue, turn, maxTurns, contCtx);
+        prompt = promptBuilder.continuation(issue, contCtx);
       }
 
       const persistLog = config.agent.persist_run_log !== false;
@@ -135,9 +135,16 @@ export async function runWorker(deps: WorkerDeps, ctx: WorkerContext): Promise<W
       };
       if (config.agent.model !== undefined) runOpts.model = config.agent.model;
       if (config.agent.effort !== undefined) runOpts.effort = config.agent.effort;
+      // Per-task overrides (set on the ticket) win over the global agent config.
+      if (issue.model !== undefined) runOpts.model = issue.model;
+      if (issue.effort !== undefined) runOpts.effort = issue.effort;
       if (config.agent.thinking !== undefined) runOpts.thinking = config.agent.thinking;
       if (config.agent.max_budget_usd !== undefined)
         runOpts.maxBudgetUsd = config.agent.max_budget_usd;
+      // The agent's own internal step budget (SDK maxTurns). Left unset by default = uncapped, so a
+      // single delegation runs to completion; bound only when the operator configures it.
+      if (config.agent.max_agent_steps !== undefined)
+        runOpts.maxTurns = config.agent.max_agent_steps;
       if (config.agent.allowed_tools !== undefined)
         runOpts.allowedTools = config.agent.allowed_tools;
       if (config.agent.disallowed_tools !== undefined)

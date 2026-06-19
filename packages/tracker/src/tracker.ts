@@ -1,4 +1,4 @@
-import type { IssueStateRef, NormalizedIssue } from '@symphony/shared';
+import type { AgentEffort, IssueStateRef, IssueUsage, NormalizedIssue } from '@symphony/shared';
 
 /**
  * Issue-tracker boundary (SPEC §11.5). The orchestrator only ever READS through
@@ -26,6 +26,9 @@ export interface CreateIssueInput {
   priority?: number;
   /** Asset links appended to the description as markdown (from uploadFile). */
   attachments?: Array<{ url: string; title: string }>;
+  /** Per-task agent overrides (fall back to global agent config). */
+  model?: string;
+  effort?: AgentEffort;
 }
 
 /** Optional write capability — used by the `ticket create` command and the dashboard. */
@@ -77,6 +80,11 @@ export interface IssuePatch {
   priority?: number | null;
   /** Full replacement set of label ids (resolved from names by the dashboard source). */
   labelIds?: string[];
+  /** Per-task agent overrides; null clears back to the global agent config. */
+  model?: string | null;
+  effort?: AgentEffort | null;
+  /** Cumulative token/cost usage written by the orchestrator on worker exit. */
+  usage?: IssueUsage;
 }
 
 export interface UploadInput {
@@ -99,6 +107,19 @@ export interface IssueWriter {
 export function supportsIssueWriter(t: Tracker): t is Tracker & IssueWriter {
   const w = t as Partial<IssueWriter>;
   return typeof w.updateIssueState === 'function' && typeof w.uploadFile === 'function';
+}
+
+/** Optional destructive operator writes (delete an issue, remove an attachment) — dashboard path. */
+export interface IssueRemover {
+  /** Permanently delete an issue (its record + comments/activity). */
+  deleteIssue(issueId: string): Promise<void>;
+  /** Remove a single attachment record (by asset url) from an issue. */
+  detachFromIssue(issueId: string, url: string): Promise<void>;
+}
+
+export function supportsIssueRemoval(t: Tracker): t is Tracker & IssueRemover {
+  const r = t as Partial<IssueRemover>;
+  return typeof r.deleteIssue === 'function' && typeof r.detachFromIssue === 'function';
 }
 
 /** A single change in an issue's history (created, state move, field edit, …). */

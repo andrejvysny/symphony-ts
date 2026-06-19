@@ -32,7 +32,14 @@ function setup(opts: {
   config?: Record<string, unknown>;
 }) {
   const config = testConfig({
-    agent: { max_turns: 1, stall_timeout_ms: 0, ...((opts.config?.['agent'] as object) ?? {}) },
+    // Permissive continuation cap by default so tests exercising the continuation path aren't blocked
+    // by the production default of 1; cap-specific tests set max_continuations explicitly.
+    agent: {
+      max_turns: 1,
+      stall_timeout_ms: 0,
+      max_continuations: 50,
+      ...((opts.config?.['agent'] as object) ?? {}),
+    },
     tracker: {
       kind: 'memory',
       active_states: ['Todo', 'In Progress'],
@@ -80,6 +87,22 @@ describe('Orchestrator', () => {
     await flush(orchestrator);
     expect(backend.calls.length).toBe(1);
     expect(orchestrator.snapshot().counts.retrying).toBe(0);
+  });
+
+  it('persists per-task token usage onto the issue on worker exit', async () => {
+    const backend = new MockBackend([{ status: 'success', tokens: { input: 100, output: 40 } }]);
+    const { orchestrator, tracker } = setup({
+      issues: [makeIssue({ id: '1', state: 'Todo' })],
+      backend,
+    });
+
+    await orchestrator.runOnce();
+    await flush(orchestrator);
+
+    const issue = (await tracker.fetchAllIssues()).find((i) => i.id === '1');
+    expect(issue?.usage?.totalTokens).toBe(140);
+    expect(issue?.usage?.inputTokens).toBe(100);
+    expect(issue?.usage?.outputTokens).toBe(40);
   });
 
   it('moves a freshly picked-up entry-lane issue to In Progress immediately', async () => {
@@ -613,6 +636,28 @@ describe('Orchestrator', () => {
     await vi.advanceTimersByTimeAsync(5_000); // blocked → no further re-dispatch
     await flush(orchestrator);
     expect(backend.calls.length).toBe(2);
+  });
+
+  it('blocks on the first exhaustion at the default continuation cap (max_continuations: 1)', async () => {
+    const backend = new MockBackend([{ status: 'success' }]); // succeeds but never parks → stays active
+    const { orchestrator } = setup({
+      issues: [makeIssue({ id: 'b1', state: 'Todo' })],
+      backend,
+      config: { agent: { max_turns: 1, stall_timeout_ms: 0, max_continuations: 1 } },
+    });
+
+    await orchestrator.runOnce(); // dispatch → exhausted → continuations=1 == cap → block, no re-dispatch
+    await flush(orchestrator);
+
+    const snap = orchestrator.snapshot();
+    expect(backend.calls.length).toBe(1);
+    expect(snap.counts.blocked).toBe(1);
+    expect(snap.counts.retrying).toBe(0);
+    expect(snap.blocked[0]!.reason).toContain('continuation cap');
+
+    await vi.advanceTimersByTimeAsync(5_000); // stays blocked — no further dispatch
+    await flush(orchestrator);
+    expect(backend.calls.length).toBe(1);
   });
 
   it('treats max_continuations: 0 as unlimited', async () => {

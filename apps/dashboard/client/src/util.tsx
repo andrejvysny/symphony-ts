@@ -46,6 +46,31 @@ export function dur(totalSec: number): string {
   return `${h}h${String(m % 60).padStart(2, '0')}m`;
 }
 
+/** Compact token count: "934", "12.3k", "1.2M". */
+export function fmtTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+/** USD cost: "$0.04" / "$1.20"; null/0 → null (caller omits it). */
+export function fmtCost(usd: number | null | undefined): string | null {
+  if (usd === null || usd === undefined || usd <= 0) return null;
+  return usd < 1 ? `$${usd.toFixed(2)}` : `$${usd.toFixed(usd < 100 ? 2 : 0)}`;
+}
+
+/** Compact "time until" a future ISO instant: "45m", "3h", "2d4h", or "now". */
+export function untilReset(iso: string, now: number): string {
+  const ms = new Date(iso).getTime() - now;
+  if (Number.isNaN(ms) || ms <= 0) return 'now';
+  const min = Math.floor(ms / 60000);
+  if (min < 60) return `${min}m`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h}h${min % 60 ? `${min % 60}m` : ''}`;
+  const d = Math.floor(h / 24);
+  return `${d}d${h % 24 ? `${h % 24}h` : ''}`;
+}
+
 /** "m:ss" countdown to a future ISO instant (retry backoff ETA). */
 export function eta(iso: string, now: number): string {
   const ms = new Date(iso).getTime() - now;

@@ -93,10 +93,11 @@ behind one `CodingAgentBackend` interface — Claude Agent SDK and a CLI stream-
   is not applied there).
 - The orchestrator is **mostly** read-only on the tracker — the agent moves tickets via the semantic
   tracker tools and may only set active + `review_state`, never a terminal state. The orchestrator
-  itself writes the tracker in three narrow spots: `markInProgressOnPickup` (entry-lane → In Progress on
-  dispatch, awaited), `finalizeTerminal` (worktree-mode merge-on-accept comment), and
-  `migrateDroppedStates` (one-time Rework/Merging → In Progress). CLI-backend writes funnel through the
-  orchestrator's bridge.
+  itself writes the tracker in four narrow spots: `markInProgressOnPickup` (entry-lane → In Progress on
+  dispatch, awaited), `finalizeTerminal` (worktree-mode merge-on-accept comment),
+  `migrateDroppedStates` (one-time Rework/Merging → In Progress), and `persistUsage` (cumulative
+  per-task token/cost usage written onto the issue's `usage` field on every worker exit — best-effort,
+  the only metadata write). CLI-backend writes funnel through the orchestrator's bridge.
 - The file store keeps state id === state name; `blockedBy` is always `[]` (auto-skip disabled). The
   orchestrator's active/terminal classification comes from `config.tracker.{active,terminal}_states`
   (state **names**); `states.json` is display-only (lane order + type/color) and tolerates drift (an
@@ -109,9 +110,20 @@ behind one `CodingAgentBackend` interface — Claude Agent SDK and a CLI stream-
   the branch and surfaces a `merge_failures` banner. The Accept path for a parked-review ticket triggers
   this via `Orchestrator.onExternalMove` (the reconcile loops only see tracked issues). `single_dir`
   cleanup is a no-op (never delete the project dir).
-- Continuation re-dispatch is bounded by `agent.max_continuations` (default 50, `0` = unlimited):
-  after that many consecutive continuations without reaching a terminal state, the issue is moved to
-  `blocked` for operator input instead of looping (prevents runaway token spend).
+- **One delegation per task is the default.** `agent.max_turns` (default 2) is Symphony's per-task
+  RE-PROMPT budget — turn 1 is the full delegation; turn 2 (only if the agent stops while the issue is
+  still active) is a single finish-up nudge via `PromptBuilder.continuation`. The agent's OWN agentic
+  loop (planning/TodoWrite/tool calls) is uncapped per turn unless `agent.max_agent_steps` is set
+  (maps to the SDK's `maxTurns`; `runOpts.maxTurns` is otherwise never set). Continuation re-dispatch is
+  bounded by `agent.max_continuations` (default 1, `0` = unlimited): on exhaustion the issue is moved to
+  `blocked` for operator input instead of looping — so a stuck task surfaces after ≤2 runs, not ~1000.
+  The turn-loop + continuation machinery is kept intact and configurable (raise the caps) for future
+  staged execution (blockers/ordering), which already has dispatch scaffolding (`blockedBy` +
+  `todoBlockedByNonTerminal`).
+- **Claude path = the in-process SDK backend** (`claude-sdk`, the default): one `query()` runs the full
+  agentic loop, tracker tools run in-process (no bridge), with clean `resume`/`canUseTool`/`maxBudgetUsd`.
+  The `cli-stream-json` adapter is for non-Claude agents (codex/opencode), which drive the tracker over
+  the Unix-socket bridge.
 - `switchProject` is the **only** path that re-points tracker/repo scope. It swaps the orchestrator's
   mutable tracker/config atomically and clears `resumeSessions` (sessions don't carry across projects).
 

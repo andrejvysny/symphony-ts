@@ -6,6 +6,7 @@ import {
   buildTracker,
   buildWorkspaceManager,
   CORE_VERSION,
+  hasActiveProject,
   createLogger,
   type Logger,
   loadConfig,
@@ -99,7 +100,9 @@ async function runOrchestrator(args: Args): Promise<void> {
   const tracker = buildTracker(config);
   const backend = buildBackend(config);
   const workspaceManager = buildWorkspaceManager(config);
-  await workspaceManager.init();
+  // No active project → skip workspace init (it requires workspace.repo). Opening/creating a project
+  // from the dashboard rebuilds + inits the workspace via switchProject.
+  if (hasActiveProject(config)) await workspaceManager.init();
   const mcpConfig = buildMcpConfig(config);
 
   const orchestrator = new Orchestrator({

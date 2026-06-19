@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 import {
   api,
+  type AgentEffort,
   type BoardIssueDTO,
   type BoardStateDTO,
   type IssueDetailDTO,
@@ -8,7 +9,7 @@ import {
   type RuntimeInfo,
   type SessionInfo,
 } from './api.js';
-import { describeActivity, fmt, StatusPill } from './util.js';
+import { describeActivity, fmt, fmtCost, fmtTokens, StatusPill } from './util.js';
 
 const PRIORITIES: { value: number | null; label: string }[] = [
   { value: 1, label: 'Urgent' },
@@ -16,6 +17,24 @@ const PRIORITIES: { value: number | null; label: string }[] = [
   { value: 3, label: 'Medium' },
   { value: 4, label: 'Low' },
   { value: null, label: 'None' },
+];
+
+// Per-task agent overrides. Empty value = inherit the workflow's global agent config.
+const MODELS: { value: string; label: string }[] = [
+  { value: '', label: 'Default (workflow)' },
+  { value: 'claude-opus-4-8', label: 'Opus 4.8' },
+  { value: 'claude-opus-4-7', label: 'Opus 4.7' },
+  { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
+  { value: 'claude-haiku-4-5', label: 'Haiku 4.5' },
+  { value: 'claude-fable-5', label: 'Fable 5' },
+];
+const EFFORTS: { value: string; label: string }[] = [
+  { value: '', label: 'Default' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'X-High' },
+  { value: 'max', label: 'Max' },
 ];
 
 interface Attachment {
@@ -27,12 +46,15 @@ interface Attachment {
 
 export function CreateTicketModal(props: {
   states: BoardStateDTO[];
+  preselectedStateId?: string | null;
   onClose: () => void;
   onCreated: () => void;
 }) {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [stateId, setStateId] = useState(props.states[0]?.id ?? '');
+  const [stateId, setStateId] = useState(props.preselectedStateId ?? props.states[0]?.id ?? '');
+  const [model, setModel] = useState('');
+  const [effort, setEffort] = useState('');
   const [atts, setAtts] = useState<Attachment[]>([]);
   const [over, setOver] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -81,6 +103,8 @@ export function CreateTicketModal(props: {
       form.set('title', title);
       if (description) form.set('description', description);
       if (stateId) form.set('stateId', stateId);
+      if (model) form.set('model', model);
+      if (effort) form.set('effort', effort);
       for (const a of atts) form.append('files', a.file, a.file.name);
       await api.createTicket(form);
       props.onCreated();
@@ -92,8 +116,13 @@ export function CreateTicketModal(props: {
 
   return (
     <div class="overlay" onClick={props.onClose}>
-      <div class="modal" data-test="create-modal" onClick={(e) => e.stopPropagation()}>
-        <h3>New ticket</h3>
+      <div class="modal create-modal" data-test="create-modal" onClick={(e) => e.stopPropagation()}>
+        <div class="modal-head">
+          <h3>New ticket</h3>
+          <button class="iconbtn" data-test="create-close" title="Close" onClick={props.onClose}>
+            ×
+          </button>
+        </div>
         {err && (
           <div class="err-banner" style="border-radius:7px;margin-bottom:8px">
             {err}
@@ -103,6 +132,7 @@ export function CreateTicketModal(props: {
           <span>Title</span>
           <input
             data-test="ticket-title"
+            placeholder="Short, imperative summary…"
             value={title}
             onInput={(e) => setTitle((e.target as HTMLInputElement).value)}
           />
@@ -111,6 +141,7 @@ export function CreateTicketModal(props: {
           <span>Description (markdown)</span>
           <textarea
             data-test="ticket-desc"
+            placeholder="Context, acceptance criteria, links…"
             value={description}
             onInput={(e) => setDescription((e.target as HTMLTextAreaElement).value)}
           />
@@ -129,6 +160,39 @@ export function CreateTicketModal(props: {
             ))}
           </select>
         </label>
+        <div class="field">
+          <span class="subhead">Agent</span>
+          <div class="field-row" style="margin-top:0">
+            <label class="field" style="margin-top:0">
+              <span>Model</span>
+              <select
+                data-test="ticket-model"
+                value={model}
+                onChange={(e) => setModel((e.target as HTMLSelectElement).value)}
+              >
+                {MODELS.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label class="field" style="margin-top:0">
+              <span>Effort</span>
+              <select
+                data-test="ticket-effort"
+                value={effort}
+                onChange={(e) => setEffort((e.target as HTMLSelectElement).value)}
+              >
+                {EFFORTS.map((x) => (
+                  <option key={x.value} value={x.value}>
+                    {x.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </div>
         <div class="field">
           <span>Attachments</span>
           <input
@@ -218,15 +282,35 @@ export function TicketModal(props: {
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState<number | null>(i.priority);
   const [labels, setLabels] = useState<string[]>(i.labels);
+  const [model, setModel] = useState('');
+  const [effort, setEffort] = useState<'' | AgentEffort>('');
   const [labelInput, setLabelInput] = useState('');
   const [labelOpts, setLabelOpts] = useState<LabelInfo[]>([]);
   const [dirty, setDirty] = useState(false);
   const dirtyRef = useRef(false);
+  // Description toggles between a read card and an editable textarea (click to edit).
+  const [editingDesc, setEditingDesc] = useState(false);
+  // Header overflow menu (Delete / Copy id / Open link) + delete confirmation.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  // Attachment upload (drag-drop / picker) on the existing issue.
+  const [attOver, setAttOver] = useState(false);
+  const attFileRef = useRef<HTMLInputElement>(null);
   const touch = () => {
     dirtyRef.current = true;
     setDirty(true);
     setSaved(false);
   };
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [menuOpen]);
 
   const load = useCallback(async () => {
     try {
@@ -239,6 +323,8 @@ export function TicketModal(props: {
         setDescription(d.description ?? '');
         setPriority(d.priority);
         setLabels(d.labels);
+        setModel(d.model ?? '');
+        setEffort(d.effort ?? '');
       }
     } catch (e) {
       setErr((e as Error).message);
@@ -301,7 +387,14 @@ export function TicketModal(props: {
     setBusy(true);
     setErr(null);
     try {
-      await api.updateIssue(i.id, { title: title.trim(), description, priority, labels });
+      await api.updateIssue(i.id, {
+        title: title.trim(),
+        description,
+        priority,
+        labels,
+        model: model || null,
+        effort: effort || null,
+      });
       dirtyRef.current = false;
       setDirty(false);
       setSaved(true);
@@ -365,10 +458,84 @@ export function TicketModal(props: {
     }
   };
 
+  // Dispatch: move the ticket into the In Progress lane and poke the orchestrator so the agent picks
+  // it up now (the configured in_progress_state is the active lane the orchestrator dispatches from).
+  const dispatch = async () => {
+    if (!reworkState) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      if (currentState !== reworkState.name) await api.moveIssue(i.id, reworkState.id);
+      await api.refresh().catch(() => undefined);
+      await load();
+      props.onChanged();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const del = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.deleteIssue(i.id);
+      props.onChanged();
+      props.onClose();
+    } catch (e) {
+      setErr((e as Error).message);
+      setBusy(false);
+      setConfirmDelete(false);
+    }
+  };
+
+  const addAttachments = async (files: FileList | null) => {
+    const list = Array.from(files ?? []);
+    if (list.length === 0) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      for (const f of list) {
+        const form = new FormData();
+        form.append('files', f, f.name);
+        await api.addAttachment(i.id, form);
+      }
+      await load();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const removeAtt = async (url: string) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.removeAttachment(i.id, url);
+      await load();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const branch = `${props.meta?.branch_prefix ?? 'symphony/'}${i.identifier}`;
   const backend = props.session?.backend ?? props.meta?.backend ?? '—';
   const scope = i.identifier.split('-')[0] ?? 'SYM';
   const worktree = detail?.worktree_path ?? null;
+  const attachments = detail?.attachments ?? [];
+  const curType = props.states.find((s) => s.name === currentState)?.type ?? '';
+  const isTerminalState =
+    curType === 'completed' || curType === 'canceled' || curType === 'cancelled';
+  const isRunning = props.session !== undefined;
+  // Image attachments preview inline; everything else shows an extension badge.
+  const isImageUrl = (u: string) => /\.(png|jpe?g|gif|webp|svg)(\?|$)/i.test(u);
+  const extOf = (u: string) => {
+    const name = u.split('/').pop() ?? u;
+    return (name.split('.').pop() ?? 'file').toUpperCase().slice(0, 4);
+  };
 
   return (
     <div class="overlay" onClick={props.onClose}>
@@ -380,9 +547,49 @@ export function TicketModal(props: {
             <span class="id">{i.identifier}</span>
             {i.status !== 'idle' && <StatusPill status={i.status} />}
           </div>
-          <button class="iconbtn" data-test="ticket-close" onClick={props.onClose}>
-            ×
-          </button>
+          <div class="head-actions" ref={menuRef}>
+            <button
+              class="iconbtn"
+              data-test="ticket-menu"
+              title="More actions"
+              onClick={() => setMenuOpen((o) => !o)}
+            >
+              ⋯
+            </button>
+            {menuOpen && (
+              <div class="head-menu" data-test="ticket-menu-pop">
+                <button
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(i.identifier);
+                    setMenuOpen(false);
+                  }}
+                >
+                  Copy id
+                </button>
+                {i.url && (
+                  <a
+                    href={i.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Open link ↗
+                  </a>
+                )}
+                {worktree && (
+                  <a
+                    href={`vscode://file${encodeURI(worktree)}`}
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Open in VS Code ↗
+                  </a>
+                )}
+              </div>
+            )}
+            <button class="iconbtn" data-test="ticket-close" onClick={props.onClose}>
+              ×
+            </button>
+          </div>
         </div>
 
         <div class="ticket-body">
@@ -397,7 +604,7 @@ export function TicketModal(props: {
                   touch();
                 }}
               />
-              <div class="opened">Updated {fmt(detail?.updatedAt ?? i.updatedAt)}</div>
+              <div class="opened">Opened {fmt(detail?.createdAt ?? i.createdAt)}</div>
             </div>
 
             {err && (
@@ -408,16 +615,94 @@ export function TicketModal(props: {
 
             <div class="section">
               <div class="label">Description</div>
-              <textarea
-                class="desc-edit"
-                data-test="edit-description"
-                placeholder="Add a description… (markdown)"
-                value={description}
-                onInput={(e) => {
-                  setDescription((e.target as HTMLTextAreaElement).value);
-                  touch();
+              {editingDesc ? (
+                <textarea
+                  class="desc-edit"
+                  data-test="edit-description"
+                  autofocus
+                  placeholder="Add a description… (markdown)"
+                  value={description}
+                  onInput={(e) => {
+                    setDescription((e.target as HTMLTextAreaElement).value);
+                    touch();
+                  }}
+                  onBlur={() => setEditingDesc(false)}
+                />
+              ) : (
+                <div
+                  class="desc desc-view"
+                  data-test="desc-view"
+                  title="Click to edit"
+                  onClick={() => setEditingDesc(true)}
+                >
+                  {description.trim() ? (
+                    description
+                  ) : (
+                    <span class="empty">Add a description… (markdown)</span>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div class="section">
+              <div class="label">
+                Attachments
+                {attachments.length > 0 && <span class="count">{attachments.length}</span>}
+              </div>
+              <input
+                type="file"
+                multiple
+                ref={attFileRef}
+                data-test="att-files"
+                style="display:none"
+                accept="image/*,.md,.log,.txt,.json,.patch,.diff"
+                onChange={(e) => {
+                  void addAttachments((e.target as HTMLInputElement).files);
+                  (e.target as HTMLInputElement).value = '';
                 }}
               />
+              <div class="att-grid">
+                <div
+                  class={`dropzone${attOver ? ' over' : ''}`}
+                  onClick={() => attFileRef.current?.click()}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setAttOver(true);
+                  }}
+                  onDragLeave={() => setAttOver(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setAttOver(false);
+                    void addAttachments(e.dataTransfer?.files ?? null);
+                  }}
+                >
+                  <span class="ic">↑</span>
+                  <span class="t">Add files</span>
+                  <span class="h">drop screenshots or click</span>
+                </div>
+                {attachments.map((a) => (
+                  <div class="att" key={a.url}>
+                    {isImageUrl(a.url) ? (
+                      <img
+                        src={a.url}
+                        alt={a.title}
+                        style="width:100%;height:100%;object-fit:cover"
+                      />
+                    ) : (
+                      <span class="ext">{extOf(a.url)}</span>
+                    )}
+                    <button
+                      class="rm"
+                      data-test="att-remove"
+                      disabled={busy}
+                      onClick={() => void removeAtt(a.url)}
+                    >
+                      ×
+                    </button>
+                    <span class="name">{a.title}</span>
+                  </div>
+                ))}
+              </div>
             </div>
 
             <div class="section">
@@ -483,6 +768,27 @@ export function TicketModal(props: {
           </div>
 
           <div class="ticket-side">
+            {isRunning && props.onViewRunningAgent ? (
+              <button
+                class="btn primary block dispatch-btn"
+                data-test="view-running-agent"
+                title="Open the live agent view for this ticket"
+                onClick={() => props.onViewRunningAgent?.(i.id)}
+              >
+                ▶ View running agent
+              </button>
+            ) : !isTerminalState && reworkState ? (
+              <button
+                class="btn primary block dispatch-btn"
+                data-test="dispatch-agent"
+                disabled={busy}
+                title={`Dispatch — move to ${reworkState.name} and run now`}
+                onClick={() => void dispatch()}
+              >
+                ▶ Dispatch to agent
+              </button>
+            ) : null}
+
             <label class="field" style="margin:0">
               <span>Status</span>
               <select
@@ -503,6 +809,14 @@ export function TicketModal(props: {
               </select>
             </label>
 
+            <div class="field" style="margin:0">
+              <span>Assignee</span>
+              <div class="assignee" data-test="assignee">
+                <span class="ai-badge">AI</span>
+                <span class="an">{backend}</span>
+              </div>
+            </div>
+
             <label class="field" style="margin:0">
               <span>Priority</span>
               <select
@@ -518,6 +832,44 @@ export function TicketModal(props: {
                 {PRIORITIES.map((p) => (
                   <option key={p.label} value={p.value === null ? 'none' : String(p.value)}>
                     {p.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label class="field" style="margin:0">
+              <span>Model</span>
+              <select
+                data-test="edit-model"
+                disabled={busy}
+                value={model}
+                onChange={(e) => {
+                  setModel((e.target as HTMLSelectElement).value);
+                  touch();
+                }}
+              >
+                {MODELS.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label class="field" style="margin:0">
+              <span>Effort</span>
+              <select
+                data-test="edit-effort"
+                disabled={busy}
+                value={effort}
+                onChange={(e) => {
+                  setEffort((e.target as HTMLSelectElement).value as '' | AgentEffort);
+                  touch();
+                }}
+              >
+                {EFFORTS.map((x) => (
+                  <option key={x.value} value={x.value}>
+                    {x.label}
                   </option>
                 ))}
               </select>
@@ -641,19 +993,22 @@ export function TicketModal(props: {
                   </span>
                 </div>
               )}
-              {props.session && props.onViewRunningAgent && (
-                <button
-                  class="btn sm"
-                  data-test="view-running-agent"
-                  title="Open the live agent view for this ticket"
-                  onClick={() => props.onViewRunningAgent?.(i.id)}
-                >
-                  ▶ View running agent
-                </button>
+              {detail?.usage && detail.usage.total_tokens > 0 && (
+                <div class="side-row">
+                  <span class="k">Usage</span>
+                  <span class="v" title="cumulative tokens (input+output) for this task">
+                    {fmtTokens(detail.usage.total_tokens)} tok
+                    {fmtCost(detail.usage.cost_usd) ? ` · ${fmtCost(detail.usage.cost_usd)}` : ''}
+                  </span>
+                </div>
               )}
               <div class="side-row">
                 <span class="k">Created</span>
                 <span class="v">{fmt(detail?.createdAt ?? i.createdAt)}</span>
+              </div>
+              <div class="side-row">
+                <span class="k">Updated</span>
+                <span class="v">{fmt(detail?.updatedAt ?? i.updatedAt)}</span>
               </div>
               {i.url && (
                 <div class="side-row">
@@ -668,12 +1023,44 @@ export function TicketModal(props: {
         </div>
 
         <div class="ticket-foot">
-          <span class="muted" style="font-size:11.5px">
-            {saved ? 'Saved ✓' : dirty ? 'Unsaved changes' : ''}
-          </span>
-          <div style="display:flex;gap:9px">
+          <div class="foot-left">
+            {confirmDelete ? (
+              <div class="confirm-del" data-test="confirm-delete">
+                <span>Delete this ticket?</span>
+                <button
+                  class="btn danger sm"
+                  data-test="confirm-delete-yes"
+                  disabled={busy}
+                  onClick={() => void del()}
+                >
+                  {busy ? 'Deleting…' : 'Delete'}
+                </button>
+                <button
+                  class="btn ghost sm"
+                  disabled={busy}
+                  onClick={() => setConfirmDelete(false)}
+                >
+                  Keep
+                </button>
+              </div>
+            ) : (
+              <button
+                class="btn danger sm"
+                data-test="ticket-delete"
+                disabled={isRunning}
+                title={isRunning ? 'terminate the agent first' : 'Delete this ticket'}
+                onClick={() => setConfirmDelete(true)}
+              >
+                Delete
+              </button>
+            )}
+          </div>
+          <div style="display:flex;align-items:center;gap:9px">
+            <span class="muted" style="font-size:11.5px">
+              {saved ? 'Saved ✓' : dirty ? 'Unsaved changes' : ''}
+            </span>
             <button class="btn ghost sm" onClick={props.onClose}>
-              Close
+              Cancel
             </button>
             <button
               class="btn primary sm"

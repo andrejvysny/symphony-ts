@@ -5,7 +5,7 @@ import {
   type CodingAgentBackend,
   type McpConfig,
 } from '@symphony/agent-backends';
-import type { ErrorCategory, NormalizedIssue } from '@symphony/shared';
+import type { ErrorCategory, IssueUsage, NormalizedIssue } from '@symphony/shared';
 import { type Tracker, supportsBoard, supportsIssueWriter } from '@symphony/tracker';
 import type { SymphonyConfig } from '../config/resolve.js';
 import { dispatchPreflight } from '../config/validate.js';
@@ -365,7 +365,13 @@ export class Orchestrator {
       this.stopIntents.clear();
       this.paused.clear();
       this.mergeFailures.clear();
-      this.state.totals = { inputTokens: 0, outputTokens: 0, totalTokens: 0, secondsRunning: 0 };
+      this.state.totals = {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        costUsd: 0,
+        secondsRunning: 0,
+      };
       this.state.rateLimits = null;
 
       // 3. Swap in the new project and resume.
@@ -428,27 +434,35 @@ export class Orchestrator {
 
   /** List currently-running sessions for the dashboard. */
   listSessions(): SessionInfo[] {
-    return [...this.state.running.values()].map((e) => ({
-      issue_id: e.issue.id,
-      issue_identifier: e.identifier,
-      state: e.issue.state,
-      session_id: e.sessionId,
-      tmux_session: e.tmuxSession,
-      pid: e.pid,
-      backend: this.backend.kind,
-      started_at: new Date(e.startedAt).toISOString(),
-      last_event: e.lastEvent,
-      last_event_at: e.lastEventAt !== null ? new Date(e.lastEventAt).toISOString() : null,
-      last_action: lastActionLabel(e.eventBuffer),
-      turn_count: e.turnCount,
-      continuation_count: this.state.continuations.get(e.issue.id) ?? 0,
-      workspace_path: e.workspacePath,
-      tokens: {
-        input_tokens: e.tokens.inputTokens,
-        output_tokens: e.tokens.outputTokens,
-        total_tokens: e.tokens.totalTokens,
-      },
-    }));
+    return [...this.state.running.values()].map((e) => {
+      const todos = latestTodos(e.eventBuffer);
+      return {
+        issue_id: e.issue.id,
+        issue_identifier: e.identifier,
+        state: e.issue.state,
+        session_id: e.sessionId,
+        tmux_session: e.tmuxSession,
+        pid: e.pid,
+        backend: this.backend.kind,
+        started_at: new Date(e.startedAt).toISOString(),
+        last_event: e.lastEvent,
+        last_event_at: e.lastEventAt !== null ? new Date(e.lastEventAt).toISOString() : null,
+        last_action: lastActionLabel(e.eventBuffer),
+        turn_count: e.turnCount,
+        continuation_count: this.state.continuations.get(e.issue.id) ?? 0,
+        workspace_path: e.workspacePath,
+        tokens: {
+          input_tokens: e.tokens.inputTokens,
+          output_tokens: e.tokens.outputTokens,
+          total_tokens: e.tokens.totalTokens,
+          cost_usd: e.tokens.costUsd,
+        },
+        todos,
+        todo_progress: todos
+          ? { done: todos.filter((t) => t.status === 'completed').length, total: todos.length }
+          : null,
+      };
+    });
   }
 
   /** Static run-wide constants the dashboard renders (capacity, caps, backend). */
@@ -529,22 +543,29 @@ export class Orchestrator {
   private refreshConfig(): void {
     if (!this.reload) return;
     const next = this.reload();
-    if (next) {
-      // Workspace topology (mode/repo/root) is owned by applySettings/switchProject — a hot reload must
-      // not flip it out from under the live workspace manager (which a plain config swap won't rebuild).
-      // Other settings, and non-topology workspace fields, still apply live.
-      const prev = this.config.workspace;
-      const nw = next.config.workspace;
-      const topologyChanged =
-        prev.mode !== nw.mode || prev.repo !== nw.repo || prev.root !== nw.root;
-      this.config = topologyChanged
-        ? {
-            ...next.config,
-            workspace: { ...nw, mode: prev.mode, repo: prev.repo, root: prev.root },
-          }
-        : next.config;
-      this.promptBuilder = new PromptBuilder(next.promptBody);
-    }
+    if (!next) return;
+    const cur = this.config;
+    const r = next.config;
+    // Project/repo scope (tracker.project_id/data_root + workspace.mode/repo/root) is owned by
+    // switchProject (and applySettings for mode). A hot reload applies everything else — agent,
+    // polling, states, hooks, prompt — but never re-points the active project or workspace topology
+    // out from under the live tracker/workspace manager (a plain config swap wouldn't rebuild them,
+    // and a stale reload mid-switch must not revert the switch).
+    this.config = {
+      ...r,
+      tracker: {
+        ...r.tracker,
+        ...(cur.tracker.project_id !== undefined ? { project_id: cur.tracker.project_id } : {}),
+        ...(cur.tracker.data_root !== undefined ? { data_root: cur.tracker.data_root } : {}),
+      },
+      workspace: {
+        ...r.workspace,
+        mode: cur.workspace.mode,
+        root: cur.workspace.root,
+        ...(cur.workspace.repo !== undefined ? { repo: cur.workspace.repo } : {}),
+      },
+    };
+    this.promptBuilder = new PromptBuilder(next.promptBody);
   }
 
   // ---- dispatch decisions ----
@@ -616,6 +637,36 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * Persist this worker run's accumulated tokens/cost onto the issue, ADDED to any usage already
+   * recorded on the task, so continuation/retry re-dispatches accumulate. Best-effort — a tracker
+   * without the writer, or a transient failure, must never break the run. This is the orchestrator's
+   * 4th (and only metadata) tracker write-spot (see CLAUDE.md Invariants).
+   */
+  private async persistUsage(entry: RunningEntry, log: Logger): Promise<void> {
+    const t = entry.tokens;
+    if (t.inputTokens === 0 && t.outputTokens === 0 && t.totalTokens === 0 && t.costUsd === 0)
+      return;
+    if (!supportsIssueWriter(this.tracker)) return;
+    const tracker = this.tracker;
+    const prior = entry.issue.usage;
+    const cost = (prior?.costUsd ?? 0) + t.costUsd;
+    const usage: IssueUsage = {
+      inputTokens: (prior?.inputTokens ?? 0) + t.inputTokens,
+      outputTokens: (prior?.outputTokens ?? 0) + t.outputTokens,
+      totalTokens: (prior?.totalTokens ?? 0) + t.totalTokens,
+      ...(cost > 0 ? { costUsd: cost } : {}),
+      updatedAt: new Date(this.now()).toISOString(),
+    };
+    // Carry forward in-memory so a continuation re-dispatch of this same issue object accumulates.
+    entry.issue.usage = usage;
+    try {
+      await tracker.updateIssue(entry.issue.id, { usage });
+    } catch (e: unknown) {
+      log.warn({ error: String(e) }, 'failed to persist task token usage');
+    }
+  }
+
   private async dispatch(issue: NormalizedIssue, attempt: number): Promise<void> {
     const entry = newRunningEntry(issue, attempt, this.now());
     this.state.running.set(issue.id, entry);
@@ -680,6 +731,7 @@ export class Orchestrator {
       this.state.totals.inputTokens += delta.inputTokens;
       this.state.totals.outputTokens += delta.outputTokens;
       this.state.totals.totalTokens += delta.totalTokens;
+      this.state.totals.costUsd += delta.costUsd;
       if (ev.rateLimits !== undefined) this.state.rateLimits = ev.rateLimits;
     }
     const subs = this.logSubscribers.get(entry.issue.id);
@@ -694,6 +746,10 @@ export class Orchestrator {
     this.state.running.delete(issueId);
     this.state.totals.secondsRunning += (this.now() - entry.startedAt) / 1000;
     const log = this.logger.child({ issue_id: issueId, issue_identifier: entry.identifier });
+
+    // Persist this run's accumulated tokens/cost onto the task (best-effort) so the count survives
+    // worker exit + restart and shows on completed tickets. Done for every disposition.
+    await this.persistUsage(entry, log);
 
     // During shutdown, do not schedule further retries/blocks — just release.
     if (this.stopping) {
@@ -1108,6 +1164,7 @@ export class Orchestrator {
           input_tokens: e.tokens.inputTokens,
           output_tokens: e.tokens.outputTokens,
           total_tokens: e.tokens.totalTokens,
+          cost_usd: e.tokens.costUsd,
         },
       })),
       blocked: [...this.state.blocked.values()].map((b) => ({
@@ -1134,6 +1191,7 @@ export class Orchestrator {
         input_tokens: this.state.totals.inputTokens,
         output_tokens: this.state.totals.outputTokens,
         total_tokens: this.state.totals.totalTokens,
+        cost_usd: this.state.totals.costUsd,
         seconds_running: this.state.totals.secondsRunning,
       },
       rate_limits: this.state.rateLimits,
@@ -1173,7 +1231,25 @@ export interface SessionInfo {
   /** Consecutive continuation re-dispatches for this issue (0 on a fresh dispatch). */
   continuation_count: number;
   workspace_path: string | null;
-  tokens: { input_tokens: number; output_tokens: number; total_tokens: number };
+  tokens: {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    /** Equivalent API cost in USD accrued so far this run (from the SDK's total_cost_usd). */
+    cost_usd: number;
+  };
+  /** The agent's own plan: its latest TodoWrite todo list (null until it writes one). */
+  todos: TodoItem[] | null;
+  /** Compact progress over `todos` (completed/total); null when the agent has no todos. */
+  todo_progress: { done: number; total: number } | null;
+}
+
+/** One item from the agent's own TodoWrite plan, surfaced live on the dashboard. */
+export interface TodoItem {
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+  /** Present-tense form Claude Code shows while the item is in progress (optional). */
+  activeForm?: string;
 }
 
 /** Run-wide constants the dashboard renders (capacity gauge, caps, configured backend). */
@@ -1207,6 +1283,50 @@ function summarizeActionArg(input: unknown): string | undefined {
     if (typeof v === 'string' && v.trim() !== '') return v.trim();
   }
   return undefined;
+}
+
+/** Parse a TodoWrite tool input into normalized todo items (null if it isn't a todo payload). */
+function parseTodos(input: unknown): TodoItem[] | null {
+  if (input === null || typeof input !== 'object') return null;
+  // `todos` arrives either as an array or as a JSON-encoded string (the CLI/deferred-tool path
+  // stringifies tool args) — accept both.
+  let raw = (input as { todos?: unknown }).todos;
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (!Array.isArray(raw)) return null;
+  const out: TodoItem[] = [];
+  for (const t of raw) {
+    if (t === null || typeof t !== 'object') continue;
+    const o = t as Record<string, unknown>;
+    if (typeof o.content !== 'string' || o.content.trim() === '') continue;
+    const status =
+      o.status === 'in_progress' || o.status === 'completed' ? o.status : ('pending' as const);
+    out.push({
+      content: o.content,
+      status,
+      ...(typeof o.activeForm === 'string' ? { activeForm: o.activeForm } : {}),
+    });
+  }
+  return out.length > 0 ? out : null;
+}
+
+/**
+ * The agent's current plan: the todos from the most recent TodoWrite tool_use in the buffer, or null.
+ * Surfaced on the dashboard so the operator can watch the agent's self-managed plan progress.
+ */
+export function latestTodos(buffer: AgentEvent[]): TodoItem[] | null {
+  for (let i = buffer.length - 1; i >= 0; i--) {
+    const ev = buffer[i];
+    if (ev === undefined || ev.type !== 'tool_use' || ev.toolName !== 'TodoWrite') continue;
+    const todos = parseTodos(ev.input);
+    if (todos) return todos;
+  }
+  return null;
 }
 
 /** Most recent meaningful action from a session's event buffer, for card/drawer signals. */

@@ -64,4 +64,18 @@ describe('integrateUsage', () => {
     expect(d.totalTokens).toBe(0);
     expect(s.totalTokens).toBe(0);
   });
+
+  it('accumulates costUsd as an absolute delta, never negative', () => {
+    const s = emptyTokenState();
+    const d1 = integrateUsage(s, { type: 'usage', costUsd: 0.05, absolute: true, at });
+    expect(d1.costUsd).toBeCloseTo(0.05);
+    expect(s.costUsd).toBeCloseTo(0.05);
+    const d2 = integrateUsage(s, { type: 'usage', costUsd: 0.12, absolute: true, at });
+    expect(d2.costUsd).toBeCloseTo(0.07);
+    expect(s.costUsd).toBeCloseTo(0.12);
+    // Regression keeps the prior total.
+    const d3 = integrateUsage(s, { type: 'usage', costUsd: 0.03, absolute: true, at });
+    expect(d3.costUsd).toBe(0);
+    expect(s.costUsd).toBeCloseTo(0.12);
+  });
 });

@@ -7,6 +7,7 @@ import type {
   IssueComment,
   IssueCreator,
   IssuePatch,
+  IssueRemover,
   IssueWriter,
   LabelInfo,
   Tracker,
@@ -77,7 +78,7 @@ function now(): string {
  * single-writer paths (SDK tools in-process, CLI tools via the bridge), all funneling here.
  */
 export class FileTracker
-  implements Tracker, IssueCreator, BoardReader, IssueWriter, ActivityReader
+  implements Tracker, IssueCreator, BoardReader, IssueWriter, IssueRemover, ActivityReader
 {
   readonly kind = 'file';
   readonly store: FileStore;
@@ -115,6 +116,22 @@ export class FileTracker
       blockedBy: s.blockedBy,
       createdAt: s.createdAt,
       updatedAt: s.updatedAt,
+      ...(s.attachments !== undefined ? { attachments: s.attachments } : {}),
+      ...(s.model !== undefined ? { model: s.model } : {}),
+      ...(s.effort !== undefined ? { effort: s.effort } : {}),
+      // Map usage explicitly: zod's `.optional()` widens costUsd to `number | undefined`, which
+      // exactOptionalPropertyTypes rejects for IssueUsage's `costUsd?: number` when spread directly.
+      ...(s.usage !== undefined
+        ? {
+            usage: {
+              inputTokens: s.usage.inputTokens,
+              outputTokens: s.usage.outputTokens,
+              totalTokens: s.usage.totalTokens,
+              updatedAt: s.usage.updatedAt,
+              ...(s.usage.costUsd !== undefined ? { costUsd: s.usage.costUsd } : {}),
+            },
+          }
+        : {}),
     };
   }
 
@@ -193,6 +210,25 @@ export class FileTracker
         changes.push(activity('labels', issue.labels.join(','), patch.labelIds.join(',')));
         next.labels = patch.labelIds;
       }
+      if (patch.model !== undefined) {
+        const nextModel = patch.model ?? undefined;
+        if (nextModel !== issue.model) {
+          changes.push(activity('model', issue.model ?? null, nextModel ?? null));
+          if (nextModel === undefined) delete next.model;
+          else next.model = nextModel;
+        }
+      }
+      if (patch.effort !== undefined) {
+        const nextEffort = patch.effort ?? undefined;
+        if (nextEffort !== issue.effort) {
+          changes.push(activity('effort', issue.effort ?? null, nextEffort ?? null));
+          if (nextEffort === undefined) delete next.effort;
+          else next.effort = nextEffort;
+        }
+      }
+      // Usage is an orchestrator-written metadata field, not an operator edit — persist it
+      // silently (no activity entry) to avoid flooding the history on every worker exit.
+      if (patch.usage !== undefined) next.usage = patch.usage;
       return next;
     });
     for (const c of changes) await this.store.appendActivity(issueId, c);
@@ -221,6 +257,26 @@ export class FileTracker
     });
   }
 
+  // ---- IssueRemover ----
+  async detachFromIssue(issueId: string, url: string): Promise<void> {
+    await this.store.mutateIssue(issueId, (issue) => ({
+      ...issue,
+      attachments: (issue.attachments ?? []).filter((a) => a.url !== url),
+      updatedAt: now(),
+    }));
+    await this.store.appendActivity(issueId, {
+      at: now(),
+      field: 'attachment',
+      verb: 'deleted',
+      oldValue: url,
+      newValue: null,
+    });
+  }
+
+  async deleteIssue(issueId: string): Promise<void> {
+    await this.store.deleteIssue(issueId);
+  }
+
   // ---- IssueCreator ----
   async createIssue(input: CreateIssueInput): Promise<NormalizedIssue> {
     const { identifier, seq } = await this.store.reserveId();
@@ -244,6 +300,8 @@ export class FileTracker
       blockedBy: [],
       createdAt: ts,
       updatedAt: ts,
+      ...(input.model !== undefined ? { model: input.model } : {}),
+      ...(input.effort !== undefined ? { effort: input.effort } : {}),
     };
     await this.store.putNewIssue(issue);
     await this.store.appendActivity(id, {

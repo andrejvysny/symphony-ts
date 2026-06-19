@@ -4,6 +4,7 @@ import {
   type BoardData,
   type BoardIssueDTO,
   type Capabilities,
+  type ClaudeUsageLimits,
   type ProjectDTO,
   type RuntimeInfo,
   type SessionInfo,
@@ -12,8 +13,9 @@ import {
 import { Board, type Live } from './board.js';
 import { AgentDrawer, AgentsView } from './agents.js';
 import { CreateTicketModal, TicketModal } from './modals.js';
-import { CreateProjectModal, ProjectSwitcher } from './projects.js';
+import { CreateProjectModal, ManageProjectsModal, ProjectSwitcher } from './projects.js';
 import { SettingsModal } from './settings.js';
+import { UsageGauge } from './usage-gauge.js';
 import { LiveDot, ThemeToggle } from './util.js';
 
 export function App() {
@@ -25,14 +27,17 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<'board' | 'agents'>('board');
   const [showCreate, setShowCreate] = useState(false);
+  const [createStateId, setCreateStateId] = useState<string | null>(null);
   const [selected, setSelected] = useState<BoardIssueDTO | null>(null);
   const [agentIssueId, setAgentIssueId] = useState<string | null>(null);
   const [caps, setCaps] = useState<Capabilities | null>(null);
+  const [usage, setUsage] = useState<ClaudeUsageLimits | null>(null);
   const [projects, setProjects] = useState<ProjectDTO[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [switching, setSwitching] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showNewProject, setShowNewProject] = useState(false);
+  const [showManageProjects, setShowManageProjects] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -94,16 +99,56 @@ export function App() {
     };
   }, [refresh, refreshProjects]);
 
+  // Claude usage limits (5h + weekly): polled on its own slow cadence (90s), independent of the
+  // board refresh, and only when the backend/flag make it available. The undocumented endpoint is
+  // server-cached (~3min), so a 90s client poll never hammers Anthropic.
+  useEffect(() => {
+    if (!caps?.usage_limits) {
+      setUsage(null);
+      return;
+    }
+    let cancelled = false;
+    const pull = () =>
+      api
+        .usageLimits()
+        .then((u) => {
+          if (!cancelled) setUsage(u);
+        })
+        .catch(() => undefined);
+    void pull();
+    const id = setInterval(() => void pull(), 90000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [caps?.usage_limits]);
+
   const switchProject = async (projectId: string) => {
     setSwitching(true);
     setError(null);
     try {
       await api.switchProject(projectId);
       await Promise.all([refresh(), refreshProjects()]);
-      await api
-        .meta()
-        .then(setMeta)
-        .catch(() => undefined);
+      await Promise.all([api.capabilities().then(setCaps), api.meta().then(setMeta)]).catch(
+        () => undefined,
+      );
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSwitching(false);
+    }
+  };
+
+  // Detach the active project → "no project" empty state (capabilities.activeProject flips to false).
+  const closeActiveProject = async () => {
+    setSwitching(true);
+    setError(null);
+    try {
+      await api.closeProject();
+      await Promise.all([refresh(), refreshProjects()]);
+      await Promise.all([api.capabilities().then(setCaps), api.meta().then(setMeta)]).catch(
+        () => undefined,
+      );
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -147,10 +192,22 @@ export function App() {
   };
 
   const states = board?.states ?? [];
+  // Count only the states the board actually shows (lanes = backlog+active+review, plus Done rail);
+  // hidden states (Cancelled, legacy Rework/Merging) are excluded so the header matches the columns.
+  const visibleStateCount = meta
+    ? states.filter((s) => {
+        const lanes = new Set(
+          [meta.backlog_state, ...meta.active_states, meta.review_state].filter(Boolean),
+        );
+        return lanes.has(s.name) || s.type === 'completed';
+      }).length
+    : states.length;
   const running = sessions.length;
   const maxAgents = meta?.max_concurrent_agents ?? 0;
   const pollSec = meta ? Math.round(meta.poll_interval_ms / 1000) : null;
   const bars = Math.min(Math.max(maxAgents, running, 1), 8);
+  // No active project (file tracker, project_id unset) → show a create/open prompt instead of a board.
+  const noProject = caps?.projects === true && caps?.activeProject === false;
 
   return (
     <div class="app">
@@ -171,12 +228,13 @@ export function App() {
                 switching={switching}
                 onSwitch={(id) => void switchProject(id)}
                 onNew={() => setShowNewProject(true)}
+                onManage={() => setShowManageProjects(true)}
               />
             </>
           )}
           <span class="sep" />
           <span class="topmeta">
-            {states.length} states{pollSec !== null ? ` · poll ${pollSec}s` : ''}
+            {visibleStateCount} states{pollSec !== null ? ` · poll ${pollSec}s` : ''}
             {meta ? ` · ${meta.backend}` : ''}
           </span>
         </div>
@@ -194,6 +252,7 @@ export function App() {
               ))}
             </span>
           </div>
+          <UsageGauge usage={usage} now={now} />
           <div class="tabs">
             <button class={tab === 'board' ? 'on' : ''} onClick={() => setTab('board')}>
               Board
@@ -206,9 +265,18 @@ export function App() {
               Agents
             </button>
           </div>
-          <button class="btn primary" data-test="new-ticket" onClick={() => setShowCreate(true)}>
-            + New ticket
-          </button>
+          {!noProject && (
+            <button
+              class="btn primary"
+              data-test="new-ticket"
+              onClick={() => {
+                setCreateStateId(null);
+                setShowCreate(true);
+              }}
+            >
+              + New ticket
+            </button>
+          )}
           <ThemeToggle />
           {caps?.settings && (
             <button
@@ -232,9 +300,36 @@ export function App() {
         </div>
       ) : null}
 
-      {!board && !error && <div class="center">connecting…</div>}
+      {noProject && (
+        <div class="center" data-test="no-project">
+          <div class="project-empty">
+            <div class="pe-mark">
+              <i />
+            </div>
+            <div class="pe-title">No project open</div>
+            <div class="pe-sub">
+              Symphony has no preconfigured project. Open an existing one or create / import a
+              folder to start delegating tasks to agents.
+            </div>
+            <div class="pe-actions">
+              <button
+                class="btn primary sm"
+                data-test="pe-open"
+                onClick={() => setShowManageProjects(true)}
+              >
+                Open a project
+              </button>
+              <button class="btn sm" data-test="pe-create" onClick={() => setShowNewProject(true)}>
+                Create / import project
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
-      {board && tab === 'board' && (
+      {!noProject && !board && !error && <div class="center">connecting…</div>}
+
+      {!noProject && board && tab === 'board' && (
         <Board
           board={board}
           live={live}
@@ -242,10 +337,14 @@ export function App() {
           onOpen={setSelected}
           onUnblock={unblock}
           onOpenAgent={setAgentIssueId}
+          onAdd={(stateId) => {
+            setCreateStateId(stateId);
+            setShowCreate(true);
+          }}
         />
       )}
 
-      {board && tab === 'agents' && (
+      {!noProject && board && tab === 'agents' && (
         <AgentsView
           sessions={sessions}
           issuesById={issuesById}
@@ -257,6 +356,7 @@ export function App() {
       {showCreate && (
         <CreateTicketModal
           states={states}
+          preselectedStateId={createStateId}
           onClose={() => setShowCreate(false)}
           onCreated={() => {
             setShowCreate(false);
@@ -299,6 +399,26 @@ export function App() {
           onCreated={() => {
             setShowNewProject(false);
             void refreshProjects();
+          }}
+        />
+      )}
+
+      {showManageProjects && (
+        <ManageProjectsModal
+          projects={projects}
+          onClose={() => setShowManageProjects(false)}
+          onChanged={() => void refreshProjects()}
+          onSwitch={(id) => {
+            setShowManageProjects(false);
+            void switchProject(id);
+          }}
+          onAdd={() => {
+            setShowManageProjects(false);
+            setShowNewProject(true);
+          }}
+          onCloseProject={() => {
+            setShowManageProjects(false);
+            void closeActiveProject();
           }}
         />
       )}

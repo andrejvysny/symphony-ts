@@ -4,6 +4,7 @@ import type {
   CreateIssueInput,
   IssueCreator,
   IssuePatch,
+  IssueRemover,
   IssueWriter,
   LabelInfo,
   Tracker,
@@ -44,7 +45,9 @@ function synthStates(active: string[], terminal: string[]): WorkflowStateInfo[] 
  * board + write surface (stateId === state name in memory). Supports scriptable
  * state transitions so a test can move an issue Todo → In Progress → Done.
  */
-export class MemoryTracker implements Tracker, IssueCreator, BoardReader, IssueWriter {
+export class MemoryTracker
+  implements Tracker, IssueCreator, BoardReader, IssueWriter, IssueRemover
+{
   readonly kind = 'memory';
   private readonly issues = new Map<string, NormalizedIssue>();
   private readonly activeStates: Set<string>;
@@ -109,6 +112,15 @@ export class MemoryTracker implements Tracker, IssueCreator, BoardReader, IssueW
     if (patch.description !== undefined) issue.description = patch.description;
     if (patch.priority !== undefined) issue.priority = patch.priority;
     if (patch.labelIds !== undefined) issue.labels = patch.labelIds; // id === name in memory
+    if (patch.model !== undefined) {
+      if (patch.model === null) delete issue.model;
+      else issue.model = patch.model;
+    }
+    if (patch.effort !== undefined) {
+      if (patch.effort === null) delete issue.effort;
+      else issue.effort = patch.effort;
+    }
+    if (patch.usage !== undefined) issue.usage = patch.usage;
   }
 
   async addComment(issueId: string, body: string): Promise<void> {
@@ -121,6 +133,20 @@ export class MemoryTracker implements Tracker, IssueCreator, BoardReader, IssueW
 
   async attachToIssue(issueId: string, url: string, title?: string): Promise<void> {
     this.attachments.push({ issueId, url, title: title ?? url });
+    const issue = this.issues.get(issueId);
+    if (issue) issue.attachments = [...(issue.attachments ?? []), { url, title: title ?? url }];
+  }
+
+  // ---- IssueRemover ----
+  async detachFromIssue(issueId: string, url: string): Promise<void> {
+    const idx = this.attachments.findIndex((a) => a.issueId === issueId && a.url === url);
+    if (idx >= 0) this.attachments.splice(idx, 1);
+    const issue = this.issues.get(issueId);
+    if (issue?.attachments) issue.attachments = issue.attachments.filter((a) => a.url !== url);
+  }
+
+  async deleteIssue(issueId: string): Promise<void> {
+    if (!this.issues.delete(issueId)) throw new Error(`issue ${issueId} not found`);
   }
 
   // ---- IssueCreator ----

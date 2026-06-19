@@ -27,20 +27,21 @@ describe('PromptBuilder', () => {
     expect(() => b.build(issue, null)).toThrow();
   });
 
-  it('produces continuation guidance referencing the turn', () => {
+  it('produces a finish-up nudge with no turn-budget framing', () => {
     const b = new PromptBuilder('x');
-    expect(b.continuation(issue, 3, 20)).toContain('MT-1');
-    expect(b.continuation(issue, 3, 20)).toContain('turn 3 of 20');
+    const out = b.continuation(issue);
+    expect(out).toContain('MT-1');
+    expect(out).toContain('Human Review');
+    // The nudge must NOT pace the agent across turns.
+    expect(out).not.toMatch(/turn \d+ of \d+/i);
   });
 
   it('enriches continuation with worktree branch + git status (O3)', () => {
     const b = new PromptBuilder('x');
-    const out = b.continuation(issue, 2, 5, { branch: 'symphony/MT-1', gitStatus: ' M src/a.ts' });
+    const out = b.continuation(issue, { branch: 'symphony/MT-1', gitStatus: ' M src/a.ts' });
     expect(out).toContain('symphony/MT-1');
     expect(out).toContain('src/a.ts');
     // An empty git status renders the clean-tree note.
-    expect(b.continuation(issue, 2, 5, { branch: 'symphony/MT-1', gitStatus: '' })).toContain(
-      'clean',
-    );
+    expect(b.continuation(issue, { branch: 'symphony/MT-1', gitStatus: '' })).toContain('clean');
   });
 });

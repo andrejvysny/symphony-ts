@@ -10,6 +10,15 @@ export type {
 } from './backend.js';
 export { nowIso } from './backend.js';
 export { ClaudeCodeSdkBackend } from './claude-sdk/claude-sdk-backend.js';
+export {
+  getClaudeUsageLimits,
+  fetchClaudeUsageLimits,
+  readClaudeOAuthToken,
+  type ClaudeUsageLimits,
+  type UsageWindow,
+  type CredentialReader,
+  type UsageFetchOptions,
+} from './claude-sdk/usage-limits.js';
 export { createBackend, type BackendKind, type BackendFactoryOptions } from './registry.js';
 export {
   classify,

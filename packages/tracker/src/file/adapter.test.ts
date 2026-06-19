@@ -6,6 +6,7 @@ import {
   supportsActivity,
   supportsBoard,
   supportsIssueCreation,
+  supportsIssueRemoval,
   supportsIssueWriter,
 } from '../tracker.js';
 import { FileTracker, type FileTrackerOptions, seedStates } from './adapter.js';
@@ -166,6 +167,31 @@ describe('FileTracker', () => {
     expect(fields).toContain('labels');
   });
 
+  it('persists and reads back task usage (no activity entry)', async () => {
+    const t = make();
+    const updatedAt = '2026-06-19T12:00:00.000Z';
+    const issue = await t.createIssue({ title: 'x', stateName: 'Todo' });
+    await t.updateIssue(issue.id, {
+      usage: {
+        inputTokens: 100,
+        outputTokens: 40,
+        totalTokens: 140,
+        costUsd: 0.05,
+        updatedAt,
+      },
+    });
+    const [fresh] = await t.fetchAllIssues();
+    expect(fresh?.usage).toEqual({
+      inputTokens: 100,
+      outputTokens: 40,
+      totalTokens: 140,
+      costUsd: 0.05,
+      updatedAt,
+    });
+    // Usage is a silent metadata write — it must not create an activity entry.
+    expect((await t.fetchActivity(issue.id)).map((a) => a.field)).not.toContain('usage');
+  });
+
   it('records comments and attachments', async () => {
     const t = make();
     const issue = await t.createIssue({ title: 'x' });
@@ -180,6 +206,42 @@ describe('FileTracker', () => {
     await t.attachToIssue(issue.id, up.assetUrl, 'b.png');
     const stored = await t.store.readIssue(issue.id);
     expect(stored?.attachments?.[0]).toEqual({ url: up.assetUrl, title: 'b.png' });
+  });
+
+  it('advertises and performs issue removal (delete + detach)', async () => {
+    const t = make();
+    expect(supportsIssueRemoval(t)).toBe(true);
+
+    // detach: keep the other attachment + record a deletion activity.
+    const issue = await t.createIssue({ title: 'x' });
+    await t.attachToIssue(issue.id, '/api/v1/uploads/demo/a/one.png', 'one.png');
+    await t.attachToIssue(issue.id, '/api/v1/uploads/demo/b/two.png', 'two.png');
+    await t.detachFromIssue(issue.id, '/api/v1/uploads/demo/a/one.png');
+    expect((await t.store.readIssue(issue.id))?.attachments).toEqual([
+      { url: '/api/v1/uploads/demo/b/two.png', title: 'two.png' },
+    ]);
+    expect(
+      (await t.fetchActivity(issue.id)).some(
+        (a) => a.field === 'attachment' && a.verb === 'deleted',
+      ),
+    ).toBe(true);
+
+    // delete: the issue disappears from the board; deleting a missing issue throws.
+    await t.addComment(issue.id, 'bye');
+    await t.deleteIssue(issue.id);
+    expect(await t.store.readIssue(issue.id)).toBeNull();
+    expect(await t.fetchAllIssues()).toEqual([]);
+    await expect(t.deleteIssue(issue.id)).rejects.toThrow(/not found/);
+  });
+
+  it('surfaces stored attachments on the normalized issue (detail path)', async () => {
+    const t = make();
+    const issue = await t.createIssue({ title: 'x' });
+    await t.attachToIssue(issue.id, '/api/v1/uploads/demo/a/p.png', 'p.png');
+    const [normalized] = await t.fetchAllIssues();
+    expect(normalized?.attachments).toEqual([
+      { url: '/api/v1/uploads/demo/a/p.png', title: 'p.png' },
+    ]);
   });
 
   it('lists workflow states from the seed and labels from seed + issues', async () => {

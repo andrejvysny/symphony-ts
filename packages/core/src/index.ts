@@ -49,9 +49,11 @@ export {
 export {
   Orchestrator,
   lastActionLabel,
+  latestTodos,
   type OrchestratorDeps,
   type OrchestratorSnapshot,
   type SessionInfo,
+  type TodoItem,
   type RuntimeInfo,
 } from './orchestrator/orchestrator.js';
 export {
@@ -79,6 +81,7 @@ export {
   buildWorkspaceManager,
   buildMcpConfig,
   fileTrackerOptions,
+  hasActiveProject,
   trackerSocketPath,
 } from './runtime.js';
 
@@ -102,6 +105,7 @@ export {
   type ProjectDTO,
   type ProjectsDTO,
   type CreateProjectInput,
+  type UpdateProjectInput,
   type SettingsDTO,
   type SettingsPatch,
   type SettingsAgentPatch,

@@ -4,9 +4,11 @@ export interface TokenState {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  costUsd: number;
   lastReportedInput: number;
   lastReportedOutput: number;
   lastReportedTotal: number;
+  lastReportedCost: number;
 }
 
 export function emptyTokenState(): TokenState {
@@ -14,9 +16,11 @@ export function emptyTokenState(): TokenState {
     inputTokens: 0,
     outputTokens: 0,
     totalTokens: 0,
+    costUsd: 0,
     lastReportedInput: 0,
     lastReportedOutput: 0,
     lastReportedTotal: 0,
+    lastReportedCost: 0,
   };
 }
 
@@ -24,6 +28,7 @@ export interface TokenDelta {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  costUsd: number;
 }
 
 /**
@@ -36,22 +41,26 @@ export function integrateUsage(
   state: TokenState,
   ev: Extract<AgentEvent, { type: 'usage' }>,
 ): TokenDelta {
-  if (!ev.absolute) return { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  if (!ev.absolute) return { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 };
 
   const nextInput = ev.inputTokens ?? state.lastReportedInput;
   const nextOutput = ev.outputTokens ?? state.lastReportedOutput;
   const nextTotal = ev.totalTokens ?? nextInput + nextOutput;
+  const nextCost = ev.costUsd ?? state.lastReportedCost;
 
   const dInput = Math.max(0, nextInput - state.lastReportedInput);
   const dOutput = Math.max(0, nextOutput - state.lastReportedOutput);
   const dTotal = Math.max(0, nextTotal - state.lastReportedTotal);
+  const dCost = Math.max(0, nextCost - state.lastReportedCost);
 
   state.inputTokens += dInput;
   state.outputTokens += dOutput;
   state.totalTokens += dTotal;
+  state.costUsd += dCost;
   state.lastReportedInput = Math.max(state.lastReportedInput, nextInput);
   state.lastReportedOutput = Math.max(state.lastReportedOutput, nextOutput);
   state.lastReportedTotal = Math.max(state.lastReportedTotal, nextTotal);
+  state.lastReportedCost = Math.max(state.lastReportedCost, nextCost);
 
-  return { inputTokens: dInput, outputTokens: dOutput, totalTokens: dTotal };
+  return { inputTokens: dInput, outputTokens: dOutput, totalTokens: dTotal, costUsd: dCost };
 }

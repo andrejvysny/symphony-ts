@@ -12,6 +12,7 @@ import {
   type FileTrackerOptions,
   makeFileSemanticTools,
   MemoryTracker,
+  NullTracker,
   type Tracker,
 } from '@symphony/tracker';
 import { ConfigError } from '@symphony/shared';
@@ -30,10 +31,19 @@ export function trackerSocketPath(config: SymphonyConfig): string {
   return path.join(dataRootOf(config), 'tracker.sock');
 }
 
-/** Derive FileTracker options for the active project from the resolved config + project registry. */
+/** Whether a project is currently active (the file tracker needs one; there is no implicit default). */
+export function hasActiveProject(config: SymphonyConfig): boolean {
+  return config.tracker.kind !== 'file' || !!config.tracker.project_id;
+}
+
+/**
+ * Derive FileTracker options for the active project from the resolved config + project registry.
+ * Caller must ensure `tracker.project_id` is set (there is no implicit "default" project).
+ */
 export function fileTrackerOptions(config: SymphonyConfig): FileTrackerOptions {
   const t = config.tracker;
-  const projectKey = t.project_id ?? 'default';
+  const projectKey = t.project_id;
+  if (!projectKey) throw new ConfigError('no active project: tracker.project_id is unset');
   const entry = config.projects.find((p) => p.project_id === projectKey);
   return {
     dataRoot: dataRootOf(config),
@@ -54,6 +64,9 @@ function allowedStatesOf(config: SymphonyConfig): string[] {
 export function buildTracker(config: SymphonyConfig): Tracker {
   const t = config.tracker;
   if (t.kind === 'file') {
+    // No active project → an inert tracker (idles, creates nothing). Switching to a real project
+    // rebuilds via this same factory.
+    if (!t.project_id) return new NullTracker();
     return new FileTracker(fileTrackerOptions(config));
   }
   if (t.kind === 'memory') {
@@ -88,7 +101,7 @@ export function buildWorkspaceManager(config: SymphonyConfig): IWorkspaceManager
  */
 export function buildMcpConfig(config: SymphonyConfig): McpConfig | undefined {
   const t = config.tracker;
-  if (t.kind !== 'file') return undefined;
+  if (t.kind !== 'file' || !t.project_id) return undefined;
 
   const allowedStates = allowedStatesOf(config);
   if (config.agent.backend === 'claude-sdk') {

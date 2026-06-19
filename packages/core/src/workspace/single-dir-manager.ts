@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { mkdir } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import type { NormalizedIssue } from '@symphony/shared';
 import { ConfigError } from '@symphony/shared';
@@ -7,6 +8,51 @@ import { runHook, type HookOutcome } from './hooks.js';
 import type { IntegrateResult, IWorkspaceManager, Workspace } from './manager.js';
 
 const execFileAsync = promisify(execFile);
+
+async function runGit(args: string[], cwd: string): Promise<string> {
+  const { stdout } = await execFileAsync('git', args, { cwd });
+  return stdout;
+}
+
+/**
+ * Ensure `repo` is a usable git repository on a born branch, creating the folder + `git init` +
+ * an initial commit when needed — so importing or switching to ANY folder "just works" in single_dir
+ * mode. Existing repositories (and their commits) are left untouched. Returns the repo toplevel path.
+ */
+export async function ensureGitRepo(repo: string): Promise<string> {
+  await mkdir(repo, { recursive: true });
+  let top: string | undefined;
+  try {
+    top = (await runGit(['rev-parse', '--show-toplevel'], repo)).trim();
+  } catch {
+    top = undefined;
+  }
+  if (!top) {
+    await runGit(['init', '-b', 'main'], repo);
+    top = (await runGit(['rev-parse', '--show-toplevel'], repo)).trim();
+  }
+  const born = await runGit(['rev-parse', '--verify', '--quiet', 'HEAD'], top)
+    .then(() => true)
+    .catch(() => false);
+  if (!born) {
+    // Born the branch with the folder's current contents (or an empty commit) so the agent has a base.
+    await runGit(['add', '-A'], top).catch(() => undefined);
+    await runGit(
+      [
+        '-c',
+        'user.name=Symphony',
+        '-c',
+        'user.email=symphony@local',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'Initial commit',
+      ],
+      top,
+    );
+  }
+  return top;
+}
 
 /**
  * Single-directory workspace manager (the default mode): the agent works DIRECTLY in `workspace.repo`
@@ -27,22 +73,16 @@ export class SingleDirWorkspaceManager implements IWorkspaceManager {
   async init(): Promise<void> {
     const repo = this.workspace.repo;
     if (!repo) throw new ConfigError('workspace.repo is required');
-    let top: string;
-    try {
-      top = (await this.git(['rev-parse', '--show-toplevel'], repo)).trim();
-    } catch {
-      throw new ConfigError(
-        `single_dir workspace.repo is not a git repository (or does not exist): ${repo}`,
-      );
-    }
-    this.repoDir = top;
+    // Provision the repo if needed (create + git init + initial commit) so switching to / importing
+    // any folder works without manual setup.
+    this.repoDir = await ensureGitRepo(repo);
   }
 
   async createForIssue(_issue: NormalizedIssue): Promise<Workspace> {
     if (!this.repoDir) {
       throw new ConfigError('SingleDirWorkspaceManager.init() must run before createForIssue');
     }
-    const branch = (await this.git(['rev-parse', '--abbrev-ref', 'HEAD'], this.repoDir)).trim();
+    const branch = (await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], this.repoDir)).trim();
     if (branch === 'HEAD') {
       throw new ConfigError(
         `single_dir repo ${this.repoDir} is in detached HEAD; checkout a branch first`,
@@ -67,11 +107,6 @@ export class SingleDirWorkspaceManager implements IWorkspaceManager {
   /** No-op: never delete the user's project directory. */
   async cleanup(_issue: NormalizedIssue): Promise<void> {
     /* intentionally empty */
-  }
-
-  private async git(args: string[], cwd: string): Promise<string> {
-    const { stdout } = await execFileAsync('git', args, { cwd });
-    return stdout;
   }
 
   private hookEnv(issue: NormalizedIssue, ws: Workspace): Record<string, string> {

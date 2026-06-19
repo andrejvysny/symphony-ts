@@ -6,10 +6,12 @@ import fastifyStatic from '@fastify/static';
 import Fastify, { type FastifyInstance } from 'fastify';
 import type {
   CreateProjectInput,
+  CreateTicketFile,
   CreateTicketInput,
   DashboardSource,
   IssueEditInput,
   SettingsPatch,
+  UpdateProjectInput,
 } from '@symphony/core';
 import { DASHBOARD_HTML } from './html.js';
 
@@ -23,6 +25,11 @@ const OTHER_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'] as const;
 const REFRESH_MIN_INTERVAL_MS = 500;
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
+
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+type Effort = (typeof EFFORTS)[number];
+const isEffort = (v: unknown): v is Effort =>
+  typeof v === 'string' && (EFFORTS as readonly string[]).includes(v);
 
 const UPLOAD_CONTENT_TYPES: Record<string, string> = {
   '.png': 'image/png',
@@ -124,6 +131,21 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
 
   app.get('/api/v1/sessions', async () => ({ sessions: source.listSessions() }));
 
+  app.get('/api/v1/usage-limits', async (_req, reply) => {
+    try {
+      return await source.getUsageLimits();
+    } catch (e) {
+      return reply
+        .code(503)
+        .send({ error: { code: 'usage_limits_unavailable', message: (e as Error).message } });
+    }
+  });
+  app.route({
+    method: [...OTHER_METHODS],
+    url: '/api/v1/usage-limits',
+    handler: methodNotAllowed,
+  });
+
   // ---- writes ----
   app.post<{ Body: CreateProjectInput }>('/api/v1/projects', async (req, reply) => {
     const b = req.body ?? ({} as CreateProjectInput);
@@ -160,6 +182,49 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
         .send({ error: { code: 'switch_failed', message: (e as Error).message } });
     }
   });
+
+  app.post('/api/v1/projects/close', async (_req, reply) => {
+    try {
+      return reply.code(200).send(await source.closeProject());
+    } catch (e) {
+      return reply
+        .code(502)
+        .send({ error: { code: 'close_project_failed', message: (e as Error).message } });
+    }
+  });
+
+  app.patch<{ Params: { projectId: string }; Body: UpdateProjectInput }>(
+    '/api/v1/projects/:projectId',
+    async (req, reply) => {
+      const b = req.body ?? {};
+      const input: UpdateProjectInput = {};
+      if (typeof b.name === 'string' && b.name.trim()) input.name = b.name.trim();
+      if (typeof b.repo === 'string' && b.repo.trim()) input.repo = b.repo.trim();
+      if (Object.keys(input).length === 0) {
+        return reply.code(400).send({ error: { code: 'empty_patch' } });
+      }
+      try {
+        return reply.code(200).send(await source.updateProject(req.params.projectId, input));
+      } catch (e) {
+        return reply
+          .code(502)
+          .send({ error: { code: 'update_project_failed', message: (e as Error).message } });
+      }
+    },
+  );
+
+  app.delete<{ Params: { projectId: string } }>(
+    '/api/v1/projects/:projectId',
+    async (req, reply) => {
+      try {
+        return reply.code(200).send(await source.removeProject(req.params.projectId));
+      } catch (e) {
+        return reply
+          .code(502)
+          .send({ error: { code: 'remove_project_failed', message: (e as Error).message } });
+      }
+    },
+  );
 
   app.patch<{ Body: SettingsPatch }>('/api/v1/settings', async (req, reply) => {
     const patch = req.body ?? {};
@@ -205,6 +270,8 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
     const input: CreateTicketInput = { title: fields['title'], files };
     if (fields['description']) input.description = fields['description'];
     if (fields['stateId']) input.stateId = fields['stateId'];
+    if (fields['model']) input.model = fields['model'];
+    if (isEffort(fields['effort'])) input.effort = fields['effort'];
     try {
       const created = await source.createTicket(input);
       return reply.code(201).send(created);
@@ -245,6 +312,8 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
       if (typeof b.description === 'string') edit.description = b.description;
       if (b.priority === null || typeof b.priority === 'number') edit.priority = b.priority;
       if (Array.isArray(b.labels)) edit.labels = b.labels.filter((l) => typeof l === 'string');
+      if (b.model === null || typeof b.model === 'string') edit.model = b.model;
+      if (b.effort === null || isEffort(b.effort)) edit.effort = b.effort;
       if (Object.keys(edit).length === 0) {
         return reply.code(400).send({ error: { code: 'empty_edit' } });
       }
@@ -255,6 +324,59 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
         return reply
           .code(502)
           .send({ error: { code: 'update_failed', message: (e as Error).message } });
+      }
+    },
+  );
+
+  app.delete<{ Params: { id: string } }>('/api/v1/issues/:id', async (req, reply) => {
+    try {
+      return reply.code(200).send(await source.deleteIssue(req.params.id));
+    } catch (e) {
+      return reply
+        .code(502)
+        .send({ error: { code: 'delete_failed', message: (e as Error).message } });
+    }
+  });
+
+  // Attach an uploaded file to an existing issue (multipart, single file).
+  app.post<{ Params: { id: string } }>('/api/v1/issues/:id/attachments', async (req, reply) => {
+    let file: CreateTicketFile | null = null;
+    try {
+      for await (const part of req.parts()) {
+        if (part.type === 'file' && !file) {
+          file = {
+            filename: part.filename,
+            contentType: part.mimetype,
+            data: await part.toBuffer(),
+          };
+        }
+      }
+    } catch (e) {
+      return reply
+        .code(400)
+        .send({ error: { code: 'bad_multipart', message: (e as Error).message } });
+    }
+    if (!file) return reply.code(400).send({ error: { code: 'missing_file' } });
+    try {
+      return reply.code(201).send(await source.addAttachment(req.params.id, file));
+    } catch (e) {
+      return reply
+        .code(502)
+        .send({ error: { code: 'attach_failed', message: (e as Error).message } });
+    }
+  });
+
+  app.delete<{ Params: { id: string }; Body: { url?: string } }>(
+    '/api/v1/issues/:id/attachments',
+    async (req, reply) => {
+      const url = req.body?.url;
+      if (!url) return reply.code(400).send({ error: { code: 'missing_url' } });
+      try {
+        return reply.code(200).send(await source.removeAttachment(req.params.id, url));
+      } catch (e) {
+        return reply
+          .code(502)
+          .send({ error: { code: 'detach_failed', message: (e as Error).message } });
       }
     },
   );

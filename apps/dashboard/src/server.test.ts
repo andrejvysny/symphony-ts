@@ -17,7 +17,7 @@ function seededSnapshot(): OrchestratorSnapshot {
         turn_count: 2,
         last_event: 'text_delta',
         started_at: new Date(0).toISOString(),
-        tokens: { input_tokens: 100, output_tokens: 40, total_tokens: 140 },
+        tokens: { input_tokens: 100, output_tokens: 40, total_tokens: 140, cost_usd: 0.42 },
       },
     ],
     blocked: [
@@ -39,7 +39,13 @@ function seededSnapshot(): OrchestratorSnapshot {
       },
     ],
     merge_failures: [],
-    codex_totals: { input_tokens: 100, output_tokens: 40, total_tokens: 140, seconds_running: 12 },
+    codex_totals: {
+      input_tokens: 100,
+      output_tokens: 40,
+      total_tokens: 140,
+      cost_usd: 0.42,
+      seconds_running: 12,
+    },
     rate_limits: null,
   };
 }
@@ -65,7 +71,14 @@ function fakeSource(): DashboardSource {
     }),
     findIssue: (id) => snap.running.find((r) => r.issue_identifier === id) ?? null,
     requestRefresh: vi.fn().mockResolvedValue({ coalesced: false }),
-    capabilities: () => ({ board: true, write: true, projects: true, settings: true }),
+    capabilities: () => ({
+      board: true,
+      write: true,
+      projects: true,
+      settings: true,
+      usage_limits: true,
+      activeProject: true,
+    }),
     listProjects: vi.fn().mockResolvedValue({
       projects: [
         {
@@ -88,6 +101,17 @@ function fakeSource(): DashboardSource {
       registered: true,
       active: false,
     }),
+    updateProject: vi.fn().mockResolvedValue({
+      project_id: 'p1',
+      name: 'Alpha renamed',
+      identifier: 'ALP',
+      repo: '~/code/alpha',
+      repo_path: '/home/u/code/alpha',
+      registered: true,
+      active: true,
+    }),
+    removeProject: vi.fn().mockResolvedValue({ removed: true }),
+    closeProject: vi.fn().mockResolvedValue({ closed: true }),
     getSettings: () => ({
       agent: {
         backend: 'claude-sdk',
@@ -106,6 +130,12 @@ function fakeSource(): DashboardSource {
       workspace: { branch_prefix: 'symphony/', mode: 'single_dir', merge_on_accept: true },
     }),
     updateSettings: vi.fn().mockResolvedValue(undefined),
+    getUsageLimits: vi.fn().mockResolvedValue({
+      available: true,
+      fiveHour: { utilization: 18, resetsAt: new Date(0).toISOString() },
+      sevenDay: { utilization: 74, resetsAt: new Date(0).toISOString() },
+      fetchedAt: new Date(0).toISOString(),
+    }),
     getBoard: vi.fn().mockResolvedValue({
       states: [
         { id: 's1', name: 'Todo', type: 'unstarted', position: 0 },
@@ -137,6 +167,9 @@ function fakeSource(): DashboardSource {
     moveIssue: vi.fn().mockResolvedValue(undefined),
     updateIssue: vi.fn().mockResolvedValue(undefined),
     addComment: vi.fn().mockResolvedValue(undefined),
+    deleteIssue: vi.fn().mockResolvedValue({ deleted: true }),
+    addAttachment: vi.fn().mockResolvedValue({ url: '/api/v1/uploads/p1/u/x.png', title: 'x.png' }),
+    removeAttachment: vi.fn().mockResolvedValue({ removed: true }),
     listSessions: () => [
       {
         issue_id: 'r1',
@@ -153,7 +186,9 @@ function fakeSource(): DashboardSource {
         turn_count: 2,
         continuation_count: 0,
         workspace_path: null,
-        tokens: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+        tokens: { input_tokens: 0, output_tokens: 0, total_tokens: 0, cost_usd: 0 },
+        todos: null,
+        todo_progress: null,
       },
     ],
     terminate: vi.fn().mockResolvedValue({ terminated: true }),
@@ -390,8 +425,31 @@ describe('dashboard server', () => {
     const app = createDashboardServer(fakeSource());
     const res = await app.inject({ method: 'GET', url: '/api/v1/capabilities' });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ board: true, write: true, projects: true, settings: true });
+    expect(res.json()).toEqual({
+      board: true,
+      write: true,
+      projects: true,
+      settings: true,
+      usage_limits: true,
+      activeProject: true,
+    });
     expect((await app.inject({ method: 'POST', url: '/api/v1/capabilities' })).statusCode).toBe(
+      405,
+    );
+    await app.close();
+  });
+
+  it('serves Claude usage limits', async () => {
+    const source = fakeSource();
+    const app = createDashboardServer(source);
+    const res = await app.inject({ method: 'GET', url: '/api/v1/usage-limits' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.available).toBe(true);
+    expect(body.fiveHour.utilization).toBe(18);
+    expect(body.sevenDay.utilization).toBe(74);
+    expect(source.getUsageLimits).toHaveBeenCalled();
+    expect((await app.inject({ method: 'POST', url: '/api/v1/usage-limits' })).statusCode).toBe(
       405,
     );
     await app.close();
@@ -420,6 +478,16 @@ describe('dashboard server', () => {
       payload: {},
     });
     expect(bad.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it('closes the active project', async () => {
+    const source = fakeSource();
+    const app = createDashboardServer(source);
+    const res = await app.inject({ method: 'POST', url: '/api/v1/projects/close' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().closed).toBe(true);
+    expect(source.closeProject).toHaveBeenCalledOnce();
     await app.close();
   });
 
@@ -478,6 +546,77 @@ describe('dashboard server', () => {
     expect(source.terminate).toHaveBeenCalledWith('r1');
     const all = await app.inject({ method: 'POST', url: '/api/v1/sessions/terminate-all' });
     expect(all.json().terminated).toBe(2);
+    await app.close();
+  });
+
+  it('deletes an issue', async () => {
+    const source = fakeSource();
+    const app = createDashboardServer(source);
+    const res = await app.inject({ method: 'DELETE', url: '/api/v1/issues/i1' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().deleted).toBe(true);
+    expect(source.deleteIssue).toHaveBeenCalledWith('i1');
+    await app.close();
+  });
+
+  it('adds and removes an attachment on an issue', async () => {
+    const source = fakeSource();
+    const app = createDashboardServer(source);
+    const { headers, payload } = multipart({ file: { name: 'shot.png', content: 'bytes' } });
+    const add = await app.inject({
+      method: 'POST',
+      url: '/api/v1/issues/i1/attachments',
+      headers,
+      payload,
+    });
+    expect(add.statusCode).toBe(201);
+    expect(source.addAttachment).toHaveBeenCalledOnce();
+    const addArg = (source.addAttachment as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(addArg[0]).toBe('i1');
+    expect(addArg[1].filename).toBe('shot.png');
+
+    const noFile = await app.inject({ method: 'POST', url: '/api/v1/issues/i1/attachments' });
+    expect(noFile.statusCode).toBe(400);
+
+    const rm = await app.inject({
+      method: 'DELETE',
+      url: '/api/v1/issues/i1/attachments',
+      payload: { url: '/api/v1/uploads/p1/u/x.png' },
+    });
+    expect(rm.statusCode).toBe(200);
+    expect(rm.json().removed).toBe(true);
+    expect(source.removeAttachment).toHaveBeenCalledWith('i1', '/api/v1/uploads/p1/u/x.png');
+
+    const rmBad = await app.inject({
+      method: 'DELETE',
+      url: '/api/v1/issues/i1/attachments',
+      payload: {},
+    });
+    expect(rmBad.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it('updates and removes a project', async () => {
+    const source = fakeSource();
+    const app = createDashboardServer(source);
+    const upd = await app.inject({
+      method: 'PATCH',
+      url: '/api/v1/projects/p1',
+      payload: { name: 'Alpha renamed', repo: '~/code/alpha2' },
+    });
+    expect(upd.statusCode).toBe(200);
+    expect(source.updateProject).toHaveBeenCalledWith('p1', {
+      name: 'Alpha renamed',
+      repo: '~/code/alpha2',
+    });
+
+    const emptyUpd = await app.inject({ method: 'PATCH', url: '/api/v1/projects/p1', payload: {} });
+    expect(emptyUpd.statusCode).toBe(400);
+
+    const rm = await app.inject({ method: 'DELETE', url: '/api/v1/projects/p2' });
+    expect(rm.statusCode).toBe(200);
+    expect(rm.json().removed).toBe(true);
+    expect(source.removeProject).toHaveBeenCalledWith('p2');
     await app.close();
   });
 });

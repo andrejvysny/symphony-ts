@@ -26,6 +26,7 @@ export function Board(props: {
   onOpen: (issue: BoardIssueDTO) => void;
   onUnblock: (issueId: string) => void;
   onOpenAgent: (issueId: string) => void;
+  onAdd: (stateId: string) => void;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   // Visible lanes = backlog + active + review (from runtime config). Done (completed) collapses to a
@@ -115,6 +116,7 @@ function Lane(props: {
   onOpen: (issue: BoardIssueDTO) => void;
   onUnblock: (issueId: string) => void;
   onOpenAgent: (issueId: string) => void;
+  onAdd: (stateId: string) => void;
   onCollapse?: () => void;
   droppable?: boolean;
 }) {
@@ -146,7 +148,7 @@ function Lane(props: {
         </div>
       </div>
       <div
-        class={`lane-body ${tone}${over ? ' dragover' : ''}${empty ? ' empty-pad' : ''}`}
+        class={`lane-body ${tone}${over ? ' dragover' : ''}${empty && !droppable ? ' empty-pad' : ''}`}
         onDragOver={
           droppable
             ? (e) => {
@@ -167,7 +169,7 @@ function Lane(props: {
             : undefined
         }
       >
-        {empty && <span class="empty">none</span>}
+        {empty && !droppable && <span class="empty">none</span>}
         {props.issues.map((i) => (
           <Card
             key={i.id}
@@ -179,6 +181,16 @@ function Lane(props: {
             onOpenAgent={props.onOpenAgent}
           />
         ))}
+        {droppable && (
+          <button
+            class="ghost-card"
+            data-test="add-card"
+            title={`New ticket in ${props.state.name}`}
+            onClick={() => props.onAdd(props.state.id)}
+          >
+            <span class="ghost-plus">+</span> Add new
+          </button>
+        )}
       </div>
     </section>
   );

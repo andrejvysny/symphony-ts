@@ -16,7 +16,8 @@ export const trackerSchema = z
     kind: z.string().default('file'),
     /** `file` store root (resolved to ~/.symphony when omitted); per-project data lives under it. */
     data_root: z.string().optional(),
-    /** Active project key — a slug naming the project's dir under `data_root` (default "default"). */
+    /** Active project key — a slug naming the project's dir under `data_root`. Unset = no active
+     *  project (the dashboard prompts to create/open one); there is no implicit "default" project. */
     project_id: z.string().optional(),
     active_states: z.array(z.string()).default(DEFAULT_ACTIVE_STATES),
     terminal_states: z.array(z.string()).default(DEFAULT_TERMINAL_STATES),
@@ -111,9 +112,26 @@ export const agentSchema = z
     permission_mode: z.enum(permissionModes).default('bypassPermissions'),
     allowed_tools: z.array(z.string()).optional(),
     disallowed_tools: z.array(z.string()).optional(),
-    max_turns: z.number().int().positive().default(20),
-    /** Cap on consecutive continuation re-dispatches before an issue is blocked. 0 disables. */
-    max_continuations: z.number().int().nonnegative().default(50),
+    /**
+     * Symphony's per-task RE-PROMPT budget — NOT the agent's internal step count. How many times the
+     * worker (re-)prompts the agent within one dispatch. Default 2 = one full delegation (turn 1) plus
+     * at most one finish-up nudge (turn 2) if the agent stops before parking the issue for review. The
+     * agent's own agentic loop (planning/todos/tool calls) is uncapped within a turn — see
+     * `max_agent_steps`.
+     */
+    max_turns: z.number().int().positive().default(2),
+    /**
+     * Cap on consecutive continuation re-dispatches before an issue is blocked for operator input.
+     * 0 = unlimited. Default 1 blocks on the first exhaustion (the single nudge lives inside the worker
+     * turn loop), so a still-unfinished task surfaces to a human instead of looping.
+     */
+    max_continuations: z.number().int().nonnegative().default(1),
+    /**
+     * The agent's OWN internal step budget within a single delegation (maps to the SDK's `maxTurns`):
+     * model↔tool cycles, not Symphony re-prompts. Omit (default) to leave it UNCAPPED so one delegation
+     * runs the task to completion; set a positive integer only to bound a runaway agent loop.
+     */
+    max_agent_steps: z.number().int().positive().optional(),
     max_concurrent_agents: z.number().int().positive().default(10),
     max_concurrent_agents_by_state: z.record(z.string(), z.number().int().positive()).default({}),
     max_retry_backoff_ms: z.number().int().positive().default(300_000),
@@ -145,6 +163,14 @@ export const agentSchema = z
     persist_run_log: z.boolean().default(true),
     /** Stream partial-message deltas (live text) where the agent supports it; off = full messages. */
     stream_partial_messages: z.boolean().default(false),
+    /**
+     * Poll the operator's Claude subscription usage limits (5h + weekly) for the dashboard top-bar
+     * gauge. On by default for Claude backends: it reads the Claude Code OAuth token (file/Keychain)
+     * and hits the UNDOCUMENTED `oauth/usage` endpoint. It only returns data on a Claude Pro/Max login
+     * (API-key auth → the gauge shows "n/a") and may prompt for macOS Keychain access on first read.
+     * Set `false` to disable the polling entirely (hides the gauge).
+     */
+    usage_limits: z.boolean().default(true),
     /** Optional env var name holding the agent API key (parse-only in v1; host login used). */
     api_key_env: z.string().optional(),
   })

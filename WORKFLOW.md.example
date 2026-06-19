@@ -5,8 +5,10 @@ tracker:
   # Local file store root — every project + its issues live under here as plain JSON.
   # Defaults to ~/.symphony when omitted. No database, no Docker, no external services.
   data_root: ~/.symphony
-  # Active project key: a slug naming its directory under <data_root>/projects/. Defaults to "default".
-  project_id: default
+  # Active project key: a slug naming its directory under <data_root>/projects/. Leave unset to start
+  # with NO active project — the dashboard then prompts you to create or open one (managed from the
+  # project switcher; the chosen project is written back here). There is no implicit "default" project.
+  # project_id: my-project
   # Symphony custom flow. The agent may set active_states + review_state (never terminal).
   # Board lanes: Backlog · Todo · In Progress · Human Review · Done. "Rework" is no longer a state —
   # the review "Rework" action sends a ticket back to In Progress with a `rework` badge. Cancelled is
@@ -62,8 +64,14 @@ agent:
   backend: claude-sdk        # claude-sdk | claude-cli | codex-cli | opencode-cli
   permission_mode: bypassPermissions   # full autonomy (high-trust)
   max_concurrent_agents: 5
-  max_turns: 20
-  max_continuations: 50       # cap consecutive continuations before blocking the issue (0 = unlimited)
+  # Symphony's per-task RE-PROMPT budget (not the agent's own steps). 2 = one full delegation + at
+  # most one finish-up nudge if the agent stops before parking the issue for review.
+  max_turns: 2
+  # Cap consecutive continuation re-dispatches before blocking the issue (0 = unlimited). 1 = surface
+  # an unfinished task to the operator after the single nudge instead of looping.
+  max_continuations: 1
+  # max_agent_steps: 200           # optional: cap the AGENT's own internal step budget (SDK maxTurns).
+  #                                # Omit to leave uncapped so one delegation runs to completion.
   # model: claude-opus-4-8         # optional model override
   # effort: high                   # low | medium | high | xhigh | max (reasoning depth; default high)
   # thinking: adaptive             # adaptive (Claude decides) | disabled

@@ -4,6 +4,7 @@ export type {
   CreateIssueInput,
   BoardReader,
   IssueWriter,
+  IssueRemover,
   IssuePatch,
   LabelInfo,
   WorkflowStateInfo,
@@ -16,9 +17,11 @@ export {
   supportsIssueCreation,
   supportsBoard,
   supportsIssueWriter,
+  supportsIssueRemoval,
   supportsActivity,
 } from './tracker.js';
 export { MemoryTracker, type MemoryTrackerOptions } from './memory/memory-tracker.js';
+export { NullTracker } from './null/null-tracker.js';
 export { FileTracker, type FileTrackerOptions, seedStates } from './file/adapter.js';
 export {
   FileStore,

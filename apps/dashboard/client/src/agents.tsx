@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { api, type BoardIssueDTO, type RuntimeInfo, type SessionInfo } from './api.js';
-import { clock, dur, LiveDot, secondsSince, useDrawerWidth } from './util.js';
+import {
+  api,
+  type BoardIssueDTO,
+  type RuntimeInfo,
+  type SessionInfo,
+  type TodoItem,
+} from './api.js';
+import { clock, dur, fmtCost, fmtTokens, LiveDot, secondsSince, useDrawerWidth } from './util.js';
 
 interface LogLine {
   cls: string;
@@ -8,11 +14,42 @@ interface LogLine {
   at: string;
 }
 
-/** Subscribe to a session's live event stream (SSE) and keep a capped line buffer. */
-function useLiveLog(issueId: string): LogLine[] {
+/** Normalize a TodoWrite tool input into todo items (null if it isn't a todo payload). */
+function parseTodos(input: unknown): TodoItem[] | null {
+  if (input === null || typeof input !== 'object') return null;
+  // `todos` arrives either as an array or as a JSON-encoded string — accept both.
+  let raw = (input as { todos?: unknown }).todos;
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (!Array.isArray(raw)) return null;
+  const out: TodoItem[] = [];
+  for (const t of raw) {
+    if (t === null || typeof t !== 'object') continue;
+    const o = t as Record<string, unknown>;
+    if (typeof o.content !== 'string' || o.content.trim() === '') continue;
+    const status =
+      o.status === 'in_progress' || o.status === 'completed' ? o.status : ('pending' as const);
+    out.push({
+      content: o.content,
+      status,
+      ...(typeof o.activeForm === 'string' ? { activeForm: o.activeForm } : {}),
+    });
+  }
+  return out.length > 0 ? out : null;
+}
+
+/** Subscribe to a session's live event stream (SSE): capped line buffer + the agent's latest plan. */
+function useLiveLog(issueId: string): { lines: LogLine[]; todos: TodoItem[] | null } {
   const [lines, setLines] = useState<LogLine[]>([]);
+  const [todos, setTodos] = useState<TodoItem[] | null>(null);
   useEffect(() => {
     setLines([]);
+    setTodos(null);
     const es = api.logStream(issueId);
     es.onmessage = (m) => {
       try {
@@ -20,6 +57,7 @@ function useLiveLog(issueId: string): LogLine[] {
           type: string;
           text?: string;
           toolName?: string;
+          input?: unknown;
           error?: string;
           at?: string;
         };
@@ -31,6 +69,11 @@ function useLiveLog(issueId: string): LogLine[] {
         } else if (ev.type === 'tool_use') {
           cls = 'tool';
           text = `${ev.toolName}`;
+          // The agent's self-managed plan: keep the latest TodoWrite snapshot.
+          if (ev.toolName === 'TodoWrite') {
+            const parsed = parseTodos(ev.input);
+            if (parsed) setTodos(parsed);
+          }
         } else if (ev.type === 'turn_failed') {
           cls = 'err';
           text = `turn failed: ${ev.error ?? ''}`;
@@ -51,7 +94,7 @@ function useLiveLog(issueId: string): LogLine[] {
       });
     return () => es.close();
   }, [issueId]);
-  return lines;
+  return { lines, todos };
 }
 
 export function AgentsView(props: {
@@ -92,7 +135,18 @@ export function AgentsView(props: {
             </div>
             <div class="chips">
               <span class="chip">turn {s.turn_count}</span>
+              {s.todo_progress && (
+                <span class="chip">
+                  ☑ {s.todo_progress.done}/{s.todo_progress.total}
+                </span>
+              )}
               {s.continuation_count > 0 && <span class="chip">↻ {s.continuation_count}</span>}
+              {s.tokens.total_tokens > 0 && (
+                <span class="chip" title="tokens this run (input+output)">
+                  ⛁ {fmtTokens(s.tokens.total_tokens)}
+                  {fmtCost(s.tokens.cost_usd) ? ` · ${fmtCost(s.tokens.cost_usd)}` : ''}
+                </span>
+              )}
               {s.tmux_session && <span class="chip tmux">⧉ tmux:{s.issue_identifier}</span>}
             </div>
           </div>
@@ -112,7 +166,9 @@ export function AgentDrawer(props: {
   onAfterAction: () => void;
 }) {
   const s = props.session;
-  const lines = useLiveLog(props.issueId);
+  const { lines, todos: liveTodos } = useLiveLog(props.issueId);
+  // Prefer the live SSE-parsed plan; fall back to the server-computed snapshot until the first frame.
+  const todos = liveTodos ?? s?.todos ?? null;
   const boxRef = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -194,6 +250,13 @@ export function AgentDrawer(props: {
               <span class="n">{dur(secondsSince(s.started_at, props.now))}</span>
               <span class="k">elapsed</span>
             </div>
+            <div class="stat">
+              <span class="n">
+                {fmtTokens(s.tokens.total_tokens)}
+                {fmtCost(s.tokens.cost_usd) ? <small>{fmtCost(s.tokens.cost_usd)}</small> : null}
+              </span>
+              <span class="k">tokens</span>
+            </div>
           </div>
 
           {stallSec > 0 && (
@@ -212,6 +275,34 @@ export function AgentDrawer(props: {
       ) : (
         <div class="stall">
           <span class="foot">session ended — showing last streamed events</span>
+        </div>
+      )}
+
+      {todos && todos.length > 0 && (
+        <div class="plan" data-test="agent-plan">
+          <div
+            class="label section"
+            style="display:flex;justify-content:space-between;align-items:center"
+          >
+            <span style="font-size:10.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted-2)">
+              Plan
+            </span>
+            <span class="ago">
+              {todos.filter((t) => t.status === 'completed').length}/{todos.length}
+            </span>
+          </div>
+          <ul class="todos">
+            {todos.map((t, n) => (
+              <li key={n} class={`todo ${t.status}`}>
+                <span class="box">
+                  {t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '▸' : '○'}
+                </span>
+                <span class="txt">
+                  {t.status === 'in_progress' && t.activeForm ? t.activeForm : t.content}
+                </span>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 

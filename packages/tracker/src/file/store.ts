@@ -40,6 +40,14 @@ const blockerSchema = z.object({ id: z.string(), identifier: z.string(), state: 
 
 const attachmentSchema = z.object({ url: z.string(), title: z.string() });
 
+const usageSchema = z.object({
+  inputTokens: z.number(),
+  outputTokens: z.number(),
+  totalTokens: z.number(),
+  costUsd: z.number().optional(),
+  updatedAt: z.string(),
+});
+
 const storedIssueSchema = z.object({
   id: z.string(),
   identifier: z.string(),
@@ -54,6 +62,11 @@ const storedIssueSchema = z.object({
   createdAt: z.string().nullable(),
   updatedAt: z.string().nullable(),
   attachments: z.array(attachmentSchema).optional(),
+  /** Per-task agent overrides (fall back to global agent config when absent). */
+  model: z.string().optional(),
+  effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
+  /** Cumulative token/cost usage accrued by the agent on this task (absent when none). */
+  usage: usageSchema.optional(),
 });
 export type StoredIssue = z.infer<typeof storedIssueSchema>;
 
@@ -329,6 +342,24 @@ export class FileStore {
       const next = fn(issue);
       await writeFileAtomic(this.issueFile(id), JSON.stringify(next, null, 2));
       return next;
+    });
+  }
+
+  /**
+   * Permanently delete an issue: its `<ID>.json` and the `<ID>/` subdir (comments + activity).
+   * Throws if the issue file does not exist. Taken under the issue's file lock so a concurrent
+   * mutate/read can't interleave.
+   */
+  async deleteIssue(id: string): Promise<void> {
+    await this.ensureProject();
+    await withFileLock(this.issueFile(id), async () => {
+      try {
+        await fs.rm(this.issueFile(id));
+      } catch (e) {
+        if (isErrno(e, 'ENOENT')) throw new Error(`issue ${id} not found`);
+        throw e;
+      }
+      await fs.rm(this.issueSubdir(id), { recursive: true, force: true });
     });
   }
 

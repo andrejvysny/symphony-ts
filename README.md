@@ -129,6 +129,19 @@ those calls are proxied to the orchestrator over an internal Unix-socket bridge,
 process stays the single writer of the file store. Tune reasoning with `agent.effort` (`low…max`) /
 `agent.thinking` (`adaptive`/`disabled`).
 
+**One delegation per task.** Symphony delegates a task to Claude Code in a single run and lets the
+agent's own loop do everything — plan (with its TodoWrite list), implement, verify, commit, and park
+for review. It does not impose its own multi-step re-prompting: `agent.max_turns` defaults to `2` (one
+delegation + at most one finish-up nudge if the agent stops early) and `agent.max_continuations` to `1`
+(a still-unfinished task is surfaced to you as **blocked** rather than looping). The agent's internal
+step budget is uncapped unless you set `agent.max_agent_steps`. The dashboard's agent drawer renders the
+agent's live TodoWrite plan as a checklist. (The multi-turn/continuation machinery stays configurable —
+raise the caps — for future staged execution with blockers/ordering.)
+
+**Claude runs on the in-process Agent SDK** (`backend: claude-sdk`, the default): one `query()` runs the
+full agentic loop and the tracker tools run in-process (no bridge needed). The `cli-stream-json` adapter
+exists for the non-Claude agents (codex/opencode).
+
 ### tmux supervision (CLI backends)
 
 Set `agent.tmux: true` to run each turn of a **CLI backend** (`claude-cli`/`codex-cli`/`opencode-cli`)

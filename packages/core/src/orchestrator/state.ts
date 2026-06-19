@@ -45,6 +45,7 @@ export interface Totals {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  costUsd: number;
   secondsRunning: number;
 }
 
@@ -78,7 +79,7 @@ export function createState(): OrchestratorState {
     blocked: new Map(),
     retryAttempts: new Map(),
     resumeSessions: new Map(),
-    totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, secondsRunning: 0 },
+    totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0, secondsRunning: 0 },
     rateLimits: null,
     pollCheckInProgress: false,
     tickTimer: null,

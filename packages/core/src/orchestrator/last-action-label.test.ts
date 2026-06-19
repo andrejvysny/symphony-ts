@@ -1,6 +1,6 @@
 import type { AgentEvent } from '@symphony/agent-backends';
 import { describe, expect, it } from 'vitest';
-import { lastActionLabel } from './orchestrator.js';
+import { lastActionLabel, latestTodos } from './orchestrator.js';
 
 const AT = '2026-06-17T00:00:00.000Z';
 const tool = (toolName: string, input: unknown): AgentEvent => ({
@@ -57,5 +57,45 @@ describe('lastActionLabel', () => {
   it('returns null for an empty buffer or only blank text', () => {
     expect(lastActionLabel([])).toBeNull();
     expect(lastActionLabel([text('   '), { type: 'turn_completed', at: AT }])).toBeNull();
+  });
+});
+
+describe('latestTodos', () => {
+  const todoWrite = (todos: unknown): AgentEvent => tool('TodoWrite', { todos });
+
+  it('extracts the most recent TodoWrite plan, normalizing status', () => {
+    const buf: AgentEvent[] = [
+      todoWrite([{ content: 'old', status: 'completed' }]),
+      tool('Edit', { file_path: '/a.ts' }),
+      todoWrite([
+        { content: 'plan it', status: 'completed' },
+        { content: 'do it', status: 'in_progress', activeForm: 'Doing it' },
+        { content: 'verify', status: 'weird' }, // unknown status → pending
+        { content: '   ', status: 'pending' }, // blank content → dropped
+      ]),
+    ];
+    expect(latestTodos(buf)).toEqual([
+      { content: 'plan it', status: 'completed' },
+      { content: 'do it', status: 'in_progress', activeForm: 'Doing it' },
+      { content: 'verify', status: 'pending' },
+    ]);
+  });
+
+  it('accepts a JSON-encoded string todos payload (CLI/deferred-tool path)', () => {
+    const json = JSON.stringify([
+      { content: 'step one', status: 'in_progress', activeForm: 'Doing step one' },
+      { content: 'step two', status: 'pending' },
+    ]);
+    expect(latestTodos([todoWrite(json)])).toEqual([
+      { content: 'step one', status: 'in_progress', activeForm: 'Doing step one' },
+      { content: 'step two', status: 'pending' },
+    ]);
+  });
+
+  it('returns null when there is no TodoWrite or the payload is unusable', () => {
+    expect(latestTodos([])).toBeNull();
+    expect(latestTodos([tool('Edit', { file_path: '/a.ts' })])).toBeNull();
+    expect(latestTodos([todoWrite('not-json-array')])).toBeNull();
+    expect(latestTodos([todoWrite([])])).toBeNull();
   });
 });

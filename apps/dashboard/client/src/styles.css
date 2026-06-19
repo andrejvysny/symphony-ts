@@ -261,6 +261,37 @@ body {
   background: var(--green);
 }
 
+/* Claude usage-limit gauge (5h + weekly) */
+.gauge.usage .usage-val {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.usage-win {
+  font-variant-numeric: tabular-nums;
+}
+.usage-win.bind {
+  font-weight: 600;
+}
+.usage-win.ok {
+  color: var(--green);
+}
+.usage-win.warn {
+  color: var(--amber);
+}
+.usage-win.crit {
+  color: var(--rose);
+}
+.usage-win.na {
+  color: var(--muted-2);
+}
+.gauge.usage.unavailable {
+  opacity: 0.7;
+}
+.usage-sep {
+  color: var(--muted-2);
+}
+
 /* live dot (ping + core) */
 .live {
   position: relative;
@@ -390,14 +421,14 @@ body {
   min-height: 0;
 }
 .lane {
-  width: 218px;
-  flex: none;
+  flex: 1 1 0;
+  min-width: 200px;
   display: flex;
   flex-direction: column;
   min-height: 0;
 }
 .lane.wide {
-  width: 300px;
+  flex-grow: 1.5;
 }
 .lane-head {
   display: flex;
@@ -477,6 +508,37 @@ body {
   align-items: center;
   justify-content: center;
   border-style: dashed;
+}
+
+/* ghost "add new" card — per-lane affordance to create a ticket directly into a column */
+.ghost-card {
+  appearance: none;
+  width: 100%;
+  background: transparent;
+  border: 1.5px dashed var(--hairline);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted-2);
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    color 0.15s,
+    background 0.15s;
+}
+.ghost-card:hover {
+  border-color: var(--blue);
+  color: var(--blue);
+  background: var(--blue-wash);
+}
+.ghost-card .ghost-plus {
+  font-size: 14px;
+  line-height: 1;
 }
 
 /* collapsed terminal rails */
@@ -714,6 +776,14 @@ body {
 .field {
   display: block;
   margin-top: 12px;
+}
+.field-row {
+  display: flex;
+  gap: 12px;
+}
+.field-row > .field {
+  flex: 1;
+  min-width: 0;
 }
 .field > span {
   display: block;
@@ -1280,6 +1350,56 @@ body.resizing-x {
   font-size: 10px;
   color: var(--faint);
 }
+.plan {
+  flex: none;
+  max-height: 32%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-bottom: 1px solid var(--hairline);
+}
+.plan .label {
+  flex: none;
+  padding: 12px 20px 6px;
+}
+.plan .todos {
+  list-style: none;
+  margin: 0;
+  padding: 0 20px 12px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.plan .todo {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted-2);
+}
+.plan .todo .box {
+  flex: none;
+  width: 14px;
+  text-align: center;
+  color: var(--faint);
+}
+.plan .todo.completed .box {
+  color: var(--green);
+}
+.plan .todo.completed .txt {
+  color: var(--faint);
+  text-decoration: line-through;
+}
+.plan .todo.in_progress .box {
+  color: var(--blue);
+}
+.plan .todo.in_progress .txt {
+  color: var(--fg);
+  font-weight: 600;
+}
+
 .activity {
   flex: 1;
   display: flex;
@@ -1501,6 +1621,33 @@ body.resizing-x {
 .menu-item.add .mi-name {
   color: var(--blue);
 }
+.menu-row {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+}
+.menu-row .menu-item {
+  flex: 1;
+  width: auto;
+}
+.mi-open {
+  display: flex;
+  align-items: center;
+  padding: 0 11px;
+  border-radius: 7px;
+  color: var(--blue);
+  text-decoration: none;
+  font-size: 13px;
+}
+.mi-open:hover {
+  background: var(--surface);
+}
+.field-hint {
+  font-size: 10.5px;
+  color: var(--muted-2);
+  line-height: 1.4;
+  margin-top: 2px;
+}
 .mi-check {
   width: 14px;
   text-align: center;
@@ -1581,4 +1728,280 @@ body.resizing-x {
   font-size: 12.5px;
   font-weight: 500;
   color: var(--fg-2);
+}
+
+/* ---- create modal header + agent subsection ---- */
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.modal-head h3 {
+  margin: 0;
+}
+.create-modal {
+  width: 520px;
+}
+.subhead {
+  display: block;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 8px;
+}
+
+/* ---- ticket header: overflow menu ---- */
+.head-actions {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.head-menu {
+  position: absolute;
+  top: 34px;
+  right: 0;
+  z-index: 60;
+  min-width: 168px;
+  background: var(--board);
+  border: 1px solid var(--border-modal);
+  border-radius: 9px;
+  padding: 5px;
+  box-shadow: var(--shadow-menu);
+  display: flex;
+  flex-direction: column;
+}
+.head-menu button,
+.head-menu a {
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  text-decoration: none;
+  color: var(--fg-1);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  padding: 7px 9px;
+  cursor: pointer;
+}
+.head-menu button:hover,
+.head-menu a:hover {
+  background: var(--surface);
+}
+
+/* ---- ticket: description read-card (click to edit) ---- */
+.desc-view {
+  cursor: text;
+  min-height: 44px;
+}
+.desc-view:hover {
+  border-color: var(--border-strong);
+}
+.desc-view .empty {
+  color: var(--faint);
+  font-style: italic;
+}
+
+/* ---- ticket: section label count chip ---- */
+.section > .label .count,
+.ticket-side .label .count {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--muted-2);
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 5px;
+  padding: 0 6px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* ---- ticket sidebar: dispatch button + assignee ---- */
+.dispatch-btn {
+  height: 38px;
+  font-size: 13px;
+}
+.assignee {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 11px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 7px;
+}
+.assignee .ai-badge,
+.cmt .avatar.ai-inline {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  border-radius: 5px;
+  background: var(--board);
+  border: 1px solid var(--green-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 8px;
+  color: var(--green);
+}
+.assignee .an {
+  font-size: 12.5px;
+  color: var(--fg-1);
+  font-family: var(--mono);
+}
+
+/* ---- ticket footer: delete + confirm ---- */
+.ticket-foot .foot-left {
+  display: flex;
+  align-items: center;
+}
+.confirm-del {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+
+/* ---- manage projects modal ---- */
+.pm-modal {
+  width: 620px;
+}
+.pm-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 56vh;
+  overflow-y: auto;
+  margin-bottom: 14px;
+}
+.pm-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 12px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 9px;
+}
+.pm-row.active {
+  border-color: var(--green-border);
+}
+.pm-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pm-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.pm-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pm-badge {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+.pm-badge.on {
+  color: var(--green);
+  background: rgba(16, 185, 129, 0.12);
+}
+.pm-badge.muted {
+  color: var(--muted-2);
+  background: var(--hairline);
+}
+.pm-sub {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pm-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.pm-edit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.pm-edit input {
+  width: 220px;
+}
+.pm-warn {
+  font-size: 10.5px;
+  color: var(--amber);
+}
+.pm-confirm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ---- no-active-project empty state ---- */
+.project-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  max-width: 420px;
+  text-align: center;
+  padding: 40px 24px;
+}
+.project-empty .pe-mark {
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.project-empty .pe-mark i {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  border: 1.5px solid var(--muted);
+}
+.project-empty .pe-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.project-empty .pe-sub {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--muted-2);
+}
+.project-empty .pe-actions {
+  display: flex;
+  gap: 9px;
+  margin-top: 4px;
 }

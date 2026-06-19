@@ -19,6 +19,7 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsup",
+    "dev": "tsup --watch",
     "test": "vitest run --passWithNoTests",
     "clean": "rm -rf dist"
   },
