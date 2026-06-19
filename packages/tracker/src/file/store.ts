@@ -176,17 +176,55 @@ export class FileStore {
   private async doEnsure(): Promise<void> {
     await fs.mkdir(this.issuesDir, { recursive: true });
     await fs.mkdir(this.uploadsDir, { recursive: true });
-    await this.writeIfAbsent(
-      this.metaFile,
-      JSON.stringify(
-        { identifier: this.seed.identifier, next_seq: 1 } satisfies StoreMeta,
-        null,
-        2,
-      ),
-    );
+    await this.ensureMeta();
     await this.writeIfAbsent(this.statesFile, JSON.stringify(this.seed.states, null, 2));
     await this.writeIfAbsent(this.labelsFile, JSON.stringify(this.seed.labels ?? [], null, 2));
     await this.ensureSeedStates();
+  }
+
+  /**
+   * Ensure meta.json exists and is valid. A fresh project seeds `{ identifier, next_seq: 1 }`. If
+   * meta.json is MISSING or CORRUPT while issue files already exist (deleted/corrupted out from under
+   * a populated project), recover instead of resetting ids to 1 — a reset would reissue existing ids
+   * and let a later create overwrite a live ticket. Recovery scans `issues/<ID>.json` for the max
+   * trailing `-<seq>` and the shared id prefix. Runs under the meta lock; the atomic write makes
+   * concurrent recovery converge (the recovered values are deterministic from the files on disk).
+   */
+  private async ensureMeta(): Promise<void> {
+    await withFileLock(this.metaFile, async () => {
+      if (await this.readJson(this.metaFile, metaSchema)) return; // valid → leave untouched
+      const recovered = await this.recoverMeta();
+      await writeFileAtomic(this.metaFile, JSON.stringify(recovered, null, 2));
+    });
+  }
+
+  /** Reconstruct meta from existing issue filenames (max trailing `-<seq>` + their shared prefix). */
+  private async recoverMeta(): Promise<StoreMeta> {
+    let names: string[] = [];
+    try {
+      names = await fs.readdir(this.issuesDir);
+    } catch (e) {
+      if (!isErrno(e, 'ENOENT')) throw e;
+    }
+    let maxSeq = 0;
+    const prefixes = new Set<string>();
+    for (const name of names) {
+      // `<prefix>-<seq>.json`; `<prefix>` may itself contain hyphens (greedy), `<seq>` is digits.
+      const m = /^(.+)-(\d+)\.json$/.exec(name);
+      if (!m) continue;
+      prefixes.add(m[1]!);
+      const seq = Number(m[2]);
+      if (Number.isFinite(seq) && seq > maxSeq) maxSeq = seq;
+    }
+    if (prefixes.size > 1) {
+      throw new Error(
+        `file store: cannot recover meta.json for project ${this.projectKey} — conflicting issue id prefixes: ${[...prefixes].sort().join(', ')}`,
+      );
+    }
+    const identifier = prefixes.size === 1 ? [...prefixes][0]! : this.seed.identifier;
+    if (maxSeq > 0)
+      this.warn(`file store: recovered meta.json for ${this.projectKey} (next_seq=${maxSeq + 1})`);
+    return { identifier, next_seq: maxSeq + 1 };
   }
 
   /**
@@ -330,7 +368,17 @@ export class FileStore {
   /** Write a brand-new issue. Its id is unique (minted from reserveId) so no lock is needed. */
   async putNewIssue(issue: StoredIssue): Promise<void> {
     await this.ensureProject();
-    await writeFileAtomic(this.issueFile(issue.id), JSON.stringify(issue, null, 2));
+    const file = this.issueFile(issue.id);
+    // Defense-in-depth: meta is the id source of truth, but never clobber an existing issue file
+    // (e.g. a recovered or hand-edited store) — overwriting would silently destroy a live ticket.
+    if (
+      await fs.access(file).then(
+        () => true,
+        () => false,
+      )
+    )
+      throw new Error(`file store: refusing to overwrite existing issue ${issue.id}`);
+    await writeFileAtomic(file, JSON.stringify(issue, null, 2));
   }
 
   /** Read-modify-write one issue under its file lock. Throws if the issue does not exist. */

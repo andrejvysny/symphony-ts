@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   buildBackend,
@@ -15,6 +17,7 @@ import {
   startTrackerBridge,
   type TrackerBridge,
   trackerSocketPath,
+  WORKFLOW_TEMPLATE,
   WorkflowStore,
 } from '@symphony/core';
 import { startDashboard } from '@symphony/dashboard';
@@ -39,6 +42,10 @@ function parseArgs(argv: string[]): Args {
       } else {
         flags.set(key, true);
       }
+    } else if (/^-[a-zA-Z]$/.test(a)) {
+      // Short boolean flags (e.g. -h, -v). Values for `--flag <value>` are consumed above, so a
+      // single-dash token only reaches here when it is a standalone short flag.
+      flags.set(a.slice(1), true);
     } else {
       positionals.push(a);
     }
@@ -54,6 +61,25 @@ function workflowPath(args: Args): string {
   return path.resolve('WORKFLOW.md');
 }
 
+async function runInit(args: Args): Promise<void> {
+  // `symphony init [path]` / `symphony init --workflow <path>` — scaffold a starter WORKFLOW.md.
+  const explicit = args.flags.get('workflow');
+  const positional = args.positionals[1];
+  const target = path.resolve(
+    typeof explicit === 'string' ? explicit : (positional ?? 'WORKFLOW.md'),
+  );
+  if (existsSync(target) && !args.flags.has('force')) {
+    process.stderr.write(`symphony: ${target} already exists (use --force to overwrite)\n`);
+    process.exitCode = 1;
+    return;
+  }
+  await writeFile(target, WORKFLOW_TEMPLATE, 'utf8');
+  process.stdout.write(
+    `created ${target}\n\nNext: edit it if you like, then run:\n  symphony --port 4500\n` +
+      `Open http://127.0.0.1:4500/ and use "+ New project" to point Symphony at a git repo.\n`,
+  );
+}
+
 async function runTicketCreate(args: Args): Promise<void> {
   const title = args.positionals[2]; // ticket create <title>
   if (!title) {
@@ -63,7 +89,17 @@ async function runTicketCreate(args: Args): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const { config } = await loadConfig(workflowPath(args));
+  const wf = workflowPath(args);
+  if (!existsSync(wf)) {
+    process.stderr.write(
+      `symphony: no WORKFLOW.md at ${wf}\n` +
+        `Run \`symphony init\` to create one, then \`symphony --port 4500\` and create a project ` +
+        `in the dashboard before adding tickets.\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const { config } = await loadConfig(wf);
   const tracker = buildTracker(config);
   if (!supportsIssueCreation(tracker)) {
     process.stderr.write(`tracker "${tracker.kind}" does not support issue creation\n`);
@@ -87,7 +123,15 @@ let activeLogger: Logger | undefined;
 async function runOrchestrator(args: Args): Promise<void> {
   const logger = createLogger({ pretty: !args.flags.has('json-logs') });
   activeLogger = logger;
-  const store = new WorkflowStore(workflowPath(args), logger);
+  const wf = workflowPath(args);
+  // Zero-config: a missing WORKFLOW.md loads defaults (no active project) so the dashboard can drive
+  // setup. Creating a project there writes the file back via the store.
+  const store = new WorkflowStore(wf, { logger, allowMissing: true });
+  if (!existsSync(wf))
+    logger.info(
+      {},
+      'no WORKFLOW.md found — running with defaults; create a project in the dashboard, or run `symphony init`',
+    );
   const { config, promptBody } = await store.load();
   const logsRootFlag = args.flags.get('logs-root');
   if (typeof logsRootFlag === 'string') config.logs_root = path.resolve(logsRootFlag);
@@ -141,8 +185,10 @@ async function runOrchestrator(args: Args): Promise<void> {
 
   const portFlag = args.flags.get('port');
   const port = typeof portFlag === 'string' ? Number(portFlag) : (config.server?.port ?? undefined);
+  if (typeof portFlag === 'string' && !(Number.isInteger(port) && port! >= 0 && port! <= 65535))
+    logger.warn({ port: portFlag }, 'ignoring invalid --port (expected an integer 0–65535)');
   let dashboard: Awaited<ReturnType<typeof startDashboard>> | undefined;
-  if (port !== undefined && Number.isFinite(port)) {
+  if (port !== undefined && Number.isInteger(port) && port >= 0 && port <= 65535) {
     dashboard = await startDashboard(buildDashboardSource(orchestrator, store), {
       port,
       host: config.server?.host ?? '127.0.0.1',
@@ -180,6 +226,7 @@ async function runOrchestrator(args: Args): Promise<void> {
 const HELP = `symphony ${CORE_VERSION} — agent-agnostic coding-agent orchestrator
 
 Usage:
+  symphony init [path] [--force]                      Write a starter WORKFLOW.md
   symphony [WORKFLOW.md] [--port <n>] [--json-logs]   Run the orchestrator
   symphony ticket create "<title>" [--desc <t>] [--state <s>] [--priority <n>]
   symphony --version
@@ -192,7 +239,9 @@ Options:
   --version, -v   Print version
   --help, -h      Show this help
 
-Workflow file: see WORKFLOW.md.example. Agent auth uses your local \`claude\` login.
+Quick start: \`symphony init\` then \`symphony --port 4500\`. With no WORKFLOW.md, the
+orchestrator runs with defaults and the dashboard prompts you to create a project.
+Agent auth uses your local \`claude\` login.
 `;
 
 async function main(argv: string[]): Promise<void> {
@@ -203,6 +252,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (args.flags.has('version') || args.flags.has('v') || args.positionals[0] === 'version') {
     process.stdout.write(`symphony ${CORE_VERSION}\n`);
+    return;
+  }
+  if (args.positionals[0] === 'init') {
+    await runInit(args);
     return;
   }
   if (args.positionals[0] === 'ticket' && args.positionals[1] === 'create') {

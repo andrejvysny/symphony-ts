@@ -1,6 +1,9 @@
+import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   buildTrackerSdkMcpServer,
   createBackend,
@@ -26,9 +29,36 @@ function dataRootOf(config: SymphonyConfig): string {
   return config.tracker.data_root ?? path.join(os.homedir(), '.symphony');
 }
 
-/** The Unix-socket path the tracker bridge listens on (CLI agents connect here). */
+/** Usable bytes in `sockaddr_un.sun_path` (total − NUL): 104 on macOS/BSD, 108 on Linux. */
+const SUN_PATH_MAX = process.platform === 'darwin' ? 103 : 107;
+
+/** Short, deterministic id for a data root — keys the tmpdir socket / Windows pipe fallback. */
+function dataRootKey(config: SymphonyConfig): string {
+  return createHash('sha256')
+    .update(path.resolve(dataRootOf(config)))
+    .digest('hex')
+    .slice(0, 16);
+}
+
+/**
+ * The IPC endpoint the tracker bridge listens on (CLI agents connect here). Normally
+ * `<data_root>/tracker.sock`, but Unix domain socket paths are capped (`sun_path`, ~104 bytes on
+ * macOS): a long data_root/home would make `listen()` fail cryptically, so fall back to a short,
+ * deterministic `os.tmpdir()` socket keyed by the data root (the bridge listener and the spawned
+ * agents' `SYMPHONY_TRACKER_SOCK` env both call this, so they always agree). Windows uses the
+ * named-pipe namespace, which has no such limit.
+ */
 export function trackerSocketPath(config: SymphonyConfig): string {
-  return path.join(dataRootOf(config), 'tracker.sock');
+  if (process.platform === 'win32') return `\\\\.\\pipe\\symphony-tracker-${dataRootKey(config)}`;
+  const preferred = path.join(dataRootOf(config), 'tracker.sock');
+  if (Buffer.byteLength(preferred) <= SUN_PATH_MAX) return preferred;
+  const fallback = path.join(os.tmpdir(), `symphony-${dataRootKey(config)}.sock`);
+  if (Buffer.byteLength(fallback) > SUN_PATH_MAX)
+    throw new ConfigError(
+      `tracker socket path too long for this platform: even the ${os.tmpdir()} fallback exceeds ` +
+        `${SUN_PATH_MAX} bytes. Set a shorter $TMPDIR or tracker.data_root.`,
+    );
+  return fallback;
 }
 
 /** Whether a project is currently active (the file tracker needs one; there is no implicit default). */
@@ -93,6 +123,17 @@ export function buildWorkspaceManager(config: SymphonyConfig): IWorkspaceManager
 }
 
 /**
+ * Resolve the stdio tracker MCP server script that CLI agent backends spawn via `node <path>`.
+ * In the published single-file CLI the server is bundled next to the entry (dist/stdio-tracker-server.js),
+ * so prefer that co-located file; otherwise (workspace/dev) resolve the tracker package's subpath export.
+ */
+function resolveStdioTrackerServerPath(): string {
+  const colocated = fileURLToPath(new URL('./stdio-tracker-server.js', import.meta.url));
+  if (existsSync(colocated)) return colocated;
+  return createRequire(import.meta.url).resolve('@symphony/tracker/stdio-tracker-server');
+}
+
+/**
  * Build the MCP config exposing the semantic tracker tools (`tracker_get_task`,
  * `tracker_update_status`, `tracker_add_comment`) to the agent. The in-process Claude SDK backend
  * gets an SDK MCP server with in-process executors over a FileTracker; CLI backends get a stdio
@@ -109,9 +150,7 @@ export function buildMcpConfig(config: SymphonyConfig): McpConfig | undefined {
     const tools = makeFileSemanticTools(tracker, allowedStates);
     return { sdkServers: () => buildTrackerSdkMcpServer({ ...tools, allowedStates }) };
   }
-  const stdioPath = createRequire(import.meta.url).resolve(
-    '@symphony/tracker/stdio-tracker-server',
-  );
+  const stdioPath = resolveStdioTrackerServerPath();
   return {
     stdioServers: {
       symphony: {

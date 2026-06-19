@@ -1,7 +1,41 @@
-import { once } from 'node:events';
 import fs from 'node:fs/promises';
 import net from 'node:net';
+import path from 'node:path';
 import type { SemanticTools } from '@symphony/tracker';
+
+function errno(e: unknown): string | undefined {
+  return typeof e === 'object' && e !== null ? (e as NodeJS.ErrnoException).code : undefined;
+}
+
+/** Resolve `listen()` on success, reject on the FIRST `error` (e.g. EADDRINUSE, path too long). */
+function listen(server: net.Server, socketPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onError = (e: Error): void => {
+      server.removeListener('listening', onListening);
+      reject(e);
+    };
+    const onListening = (): void => {
+      server.removeListener('error', onError);
+      resolve();
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(socketPath);
+  });
+}
+
+/** Probe an existing socket: `true` if a live listener accepts a connection, `false` if stale. */
+function isSocketLive(socketPath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const client = net.connect(socketPath);
+    const settle = (live: boolean): void => {
+      client.destroy();
+      resolve(live);
+    };
+    client.once('connect', () => settle(true));
+    client.once('error', () => settle(false));
+  });
+}
 
 /**
  * Loopback Unix-socket bridge that lets out-of-process CLI agents drive the tracker through the
@@ -23,8 +57,12 @@ export async function startTrackerBridge(opts: {
   resolveTools: () => SemanticTools;
 }): Promise<TrackerBridge> {
   const { socketPath, resolveTools } = opts;
-  // Clear any stale socket left by a crashed previous run.
-  await fs.rm(socketPath, { force: true });
+  // Windows uses the named-pipe namespace (no filesystem entry); Unix uses a socket file we manage.
+  const isPipe = process.platform === 'win32';
+  if (!isPipe)
+    // Ensure data_root exists — on a first run the socket's parent dir (e.g. ~/.symphony) may not
+    // exist yet, and net.Server.listen() would fail before any project is created.
+    await fs.mkdir(path.dirname(socketPath), { recursive: true });
 
   const dispatch = async (line: string, sock: net.Socket): Promise<void> => {
     let req: { id?: unknown; tool?: unknown; input?: unknown };
@@ -70,14 +108,32 @@ export async function startTrackerBridge(opts: {
     sock.on('error', () => {});
   });
 
-  server.listen(socketPath);
-  await once(server, 'listening');
+  try {
+    await listen(server, socketPath);
+  } catch (e) {
+    if (errno(e) !== 'EADDRINUSE') {
+      throw new Error(`tracker bridge: cannot listen on ${socketPath}: ${(e as Error).message}`);
+    }
+    // Endpoint in use: refuse to steal a LIVE one (protects the single-writer invariant), but
+    // recover a stale socket left by a crashed run. Windows pipes vanish with their process, so an
+    // in-use pipe is always a live peer.
+    if (!isPipe && !(await isSocketLive(socketPath))) {
+      await fs.rm(socketPath, { force: true });
+      await listen(server, socketPath); // retry once; propagate if it still fails
+    } else {
+      throw new Error(
+        `tracker bridge: another Symphony instance is already running on ${socketPath} ` +
+          `(same data_root). Stop it first, or use a different tracker.data_root.`,
+      );
+    }
+  }
 
   return {
     socketPath,
     async close(): Promise<void> {
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      await fs.rm(socketPath, { force: true });
+      // Remove only our own endpoint (Unix socket file); Windows pipes are cleaned up by the OS.
+      if (!isPipe) await fs.rm(socketPath, { force: true });
     },
   };
 }

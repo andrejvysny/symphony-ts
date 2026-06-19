@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { AgentEvent, ClaudeUsageLimits } from '@symphony/agent-backends';
@@ -429,6 +430,19 @@ export function buildDashboardSource(
       const base = slugify(input.name);
       let key = base;
       for (let n = 2; taken.has(key); n++) key = `${base}-${n}`;
+      const entry: ProjectEntry = {
+        name: input.name,
+        project_id: key,
+        repo: input.repo,
+        identifier: input.identifier,
+      };
+      const mutate = (raw: Record<string, unknown>): void => {
+        const list = Array.isArray(raw['projects']) ? (raw['projects'] as unknown[]) : [];
+        list.push(entry);
+        raw['projects'] = list;
+      };
+      // Validate the registry change BEFORE scaffolding so bad input can't orphan a project dir.
+      st.composeConfig(mutate);
       // Scaffold the on-disk project (seed states from the configured workflow).
       await scaffoldProject({
         dataRoot,
@@ -438,17 +452,16 @@ export function buildDashboardSource(
           states: seedStates(t.backlog_state, t.active_states, t.review_state, t.terminal_states),
         },
       });
-      const entry: ProjectEntry = {
-        name: input.name,
-        project_id: key,
-        repo: input.repo,
-        identifier: input.identifier,
-      };
-      const snap = await st.persist((raw) => {
-        const list = Array.isArray(raw['projects']) ? (raw['projects'] as unknown[]) : [];
-        list.push(entry);
-        raw['projects'] = list;
-      });
+      let snap;
+      try {
+        snap = await st.persist(mutate);
+      } catch (e) {
+        // Writing the registry failed after scaffolding — remove the orphaned dir before surfacing.
+        await rm(path.join(dataRoot, 'projects', key), { recursive: true, force: true }).catch(
+          () => undefined,
+        );
+        throw e;
+      }
       orchestrator.applyConfig(snap.config); // make the new registry entry visible immediately
       return {
         project_id: key,

@@ -126,3 +126,94 @@ describe('FileStore', () => {
     expect((await listProjectKeys(root)).sort()).toEqual(['alpha', 'beta']);
   });
 });
+
+describe('FileStore meta.json recovery', () => {
+  let root: string;
+  const opts = (extra: Partial<FileStoreOptions> = {}): FileStoreOptions => ({
+    dataRoot: root,
+    projectKey: 'demo',
+    seed: SEED,
+    ...extra,
+  });
+  const mkIssue = (id: string) => ({
+    id,
+    identifier: id,
+    title: 't',
+    description: null,
+    priority: null,
+    state: 'Todo',
+    branchName: null,
+    url: null,
+    labels: [],
+    blockedBy: [],
+    createdAt: null,
+    updatedAt: null,
+  });
+  const metaPath = (): string => path.join(root, 'projects', 'demo', 'meta.json');
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(os.tmpdir(), 'symphony-fsr-'));
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('recovers next_seq from issue files when meta.json is deleted (no id reuse)', async () => {
+    const a = new FileStore(opts());
+    await a.putNewIssue(mkIssue('SYM-7'));
+    await rm(metaPath(), { force: true });
+    const b = new FileStore(opts()); // fresh instance → doEnsure runs recovery
+    expect(await b.reserveId()).toEqual({ identifier: 'SYM', seq: 8 });
+  });
+
+  it('recovers from a corrupt meta.json', async () => {
+    const a = new FileStore(opts());
+    await a.putNewIssue(mkIssue('SYM-5'));
+    await writeFile(metaPath(), '{ not valid json');
+    expect((await new FileStore(opts()).reserveId()).seq).toBe(6);
+  });
+
+  it('recovers the id prefix from existing files, not the seed', async () => {
+    const a = new FileStore(opts());
+    await a.putNewIssue(mkIssue('ACM-3'));
+    await rm(metaPath(), { force: true });
+    expect(await new FileStore(opts()).reserveId()).toEqual({ identifier: 'ACM', seq: 4 });
+  });
+
+  it('handles multi-hyphen id prefixes', async () => {
+    const a = new FileStore(opts());
+    await a.putNewIssue(mkIssue('ACME-API-12'));
+    await rm(metaPath(), { force: true });
+    expect(await new FileStore(opts()).reserveId()).toEqual({ identifier: 'ACME-API', seq: 13 });
+  });
+
+  it('ignores foreign/non-issue filenames during recovery', async () => {
+    const a = new FileStore(opts());
+    await a.putNewIssue(mkIssue('SYM-2'));
+    await writeFile(path.join(root, 'projects', 'demo', 'issues', 'notes.txt'), 'x');
+    await writeFile(path.join(root, 'projects', 'demo', 'issues', 'weird.json'), '{}');
+    await rm(metaPath(), { force: true });
+    expect((await new FileStore(opts()).reserveId()).seq).toBe(3);
+  });
+
+  it('an empty project recovers to the seed identifier + seq 1', async () => {
+    const a = new FileStore(opts());
+    await a.ensureProject();
+    await rm(metaPath(), { force: true });
+    expect(await new FileStore(opts()).reserveId()).toEqual({ identifier: 'SYM', seq: 1 });
+  });
+
+  it('fails loudly on conflicting id prefixes', async () => {
+    const a = new FileStore(opts());
+    await a.putNewIssue(mkIssue('SYM-1'));
+    await a.putNewIssue(mkIssue('ACM-2'));
+    await rm(metaPath(), { force: true });
+    await expect(new FileStore(opts()).reserveId()).rejects.toThrow(/conflicting/);
+  });
+
+  it('putNewIssue refuses to overwrite an existing issue', async () => {
+    const a = new FileStore(opts());
+    await a.putNewIssue(mkIssue('SYM-1'));
+    await expect(a.putNewIssue(mkIssue('SYM-1'))).rejects.toThrow(/refusing to overwrite/);
+  });
+});

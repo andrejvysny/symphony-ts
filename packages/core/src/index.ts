@@ -21,6 +21,7 @@ export {
 } from './config/resolve.js';
 export { dispatchPreflight, type PreflightResult } from './config/validate.js';
 export { loadConfig, type LoadedConfig } from './config/load.js';
+export { WORKFLOW_TEMPLATE } from './config/workflow-template.js';
 
 // workflow
 export { loadWorkflowFile, parseWorkflowFile, type LoadedWorkflow } from './workflow/loader.js';

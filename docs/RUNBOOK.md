@@ -62,16 +62,22 @@ pnpm install && pnpm build
 
 ## 2. Configure `WORKFLOW.md`
 
-Copy the annotated example and edit it:
+Scaffold a starter config (or copy the annotated example):
 
 ```bash
-cp WORKFLOW.md.example WORKFLOW.md
+symphony init            # writes WORKFLOW.md  (or: cp WORKFLOW.md.example WORKFLOW.md)
 ```
+
+`WORKFLOW.md` is **optional**: `symphony --port 4500` runs zero-config with defaults and the
+dashboard prompts you to create a project (it writes the file back). Editing keys:
 
 - `tracker.kind` → `file` (the only supported tracker).
 - `tracker.data_root` → leave as `~/.symphony` (or point elsewhere; the store is created on demand).
 - `tracker.project_id` → the active project key, a slug naming its directory under
-  `<data_root>/projects/`. Defaults to `default`.
+  `<data_root>/projects/`. **Unset = no active project** (there is no implicit `default`); the
+  dashboard's project switcher creates/opens one and writes it back here. Activating a project by
+  hand-editing this while the orchestrator is running needs a restart — use the switcher for live
+  re-pointing.
 - `tracker.active_states` / `review_state` / `terminal_states` → state **names** (case-sensitive). The
   agent may set `active_states` + `review_state`, never a terminal state. These names are seeded into
   the project's `states.json`, so a typo just creates a state nothing dispatches into. Defaults:

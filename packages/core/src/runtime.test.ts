@@ -89,3 +89,23 @@ describe('runtime file tracker wiring', () => {
     expect(JSON.parse(server?.env?.['SYMPHONY_AGENT_STATES'] ?? '[]')).toContain('Human Review');
   });
 });
+
+describe.skipIf(process.platform === 'win32')('trackerSocketPath length fallback', () => {
+  const cfg = (dataRoot: string): SymphonyConfig =>
+    resolveConfig(parseConfig({ tracker: { kind: 'file', data_root: dataRoot } }), '/tmp');
+
+  it('falls back to a short tmpdir socket when the path would exceed sun_path', () => {
+    const sock = trackerSocketPath(cfg(`/tmp/${'x'.repeat(120)}`));
+    expect(sock.startsWith(os.tmpdir())).toBe(true);
+    expect(sock).toMatch(/symphony-[0-9a-f]{16}\.sock$/);
+    expect(Buffer.byteLength(sock)).toBeLessThanOrEqual(107);
+  });
+
+  it('is deterministic per data root and distinct across roots', () => {
+    const a1 = trackerSocketPath(cfg(`/tmp/${'a'.repeat(120)}`));
+    const a2 = trackerSocketPath(cfg(`/tmp/${'a'.repeat(120)}`));
+    const b = trackerSocketPath(cfg(`/tmp/${'b'.repeat(120)}`));
+    expect(a1).toBe(a2);
+    expect(a1).not.toBe(b);
+  });
+});

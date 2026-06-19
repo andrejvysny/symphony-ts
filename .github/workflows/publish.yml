@@ -1,0 +1,51 @@
+name: Publish
+
+# Publishes @andrejvysny/symphony to npm on a version tag (e.g. v0.1.1), using npm trusted publishing
+# (OIDC) — no NPM_TOKEN secret. Provenance attestations are generated automatically.
+#
+# One-time setup before the first tag can publish via this workflow:
+#   1. Bootstrap-publish v0.1.0 manually (`pnpm release:publish` with `npm login`) so the package
+#      exists on npm.
+#   2. On npmjs.com → @andrejvysny/symphony → Settings → Trusted Publisher → GitHub Actions:
+#      org `andrejvysny`, repo `symphony-ts`, workflow `publish.yml`.
+#   3. Bump apps/cli/package.json to the next version, then push a matching tag (vX.Y.Z).
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  id-token: write # OIDC token for npm trusted publishing + provenance
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing (OIDC) requires npm >= 11.5.1; Node 22 ships npm 10.
+      - run: npm install -g npm@latest
+
+      - run: pnpm install --frozen-lockfile
+
+      # Gates (same as ci.yml) — never publish a broken build.
+      - run: pnpm build
+      - run: pnpm test
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm format:check
+
+      # Strip workspace devDeps + maps and publish. OIDC supplies auth + provenance automatically.
+      - run: pnpm release:pack

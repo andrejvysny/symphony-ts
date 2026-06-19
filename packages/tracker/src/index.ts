@@ -47,7 +47,7 @@ export {
   connectBridge,
   type BridgeClient,
   type TrackerStdioToolDeps,
-} from './tools/stdio-tracker-server.js';
+} from './tools/stdio-tracker-lib.js';
 export {
   makeSetIssueStateExecutor,
   makeAddCommentExecutor,

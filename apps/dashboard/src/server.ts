@@ -271,7 +271,11 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
     if (fields['description']) input.description = fields['description'];
     if (fields['stateId']) input.stateId = fields['stateId'];
     if (fields['model']) input.model = fields['model'];
-    if (isEffort(fields['effort'])) input.effort = fields['effort'];
+    if (fields['effort'] !== undefined && fields['effort'] !== '') {
+      if (!isEffort(fields['effort']))
+        return reply.code(400).send({ error: { code: 'invalid_effort' } });
+      input.effort = fields['effort'];
+    }
     try {
       const created = await source.createTicket(input);
       return reply.code(201).send(created);
@@ -313,7 +317,11 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
       if (b.priority === null || typeof b.priority === 'number') edit.priority = b.priority;
       if (Array.isArray(b.labels)) edit.labels = b.labels.filter((l) => typeof l === 'string');
       if (b.model === null || typeof b.model === 'string') edit.model = b.model;
-      if (b.effort === null || isEffort(b.effort)) edit.effort = b.effort;
+      if (b.effort !== undefined) {
+        if (b.effort !== null && !isEffort(b.effort))
+          return reply.code(400).send({ error: { code: 'invalid_effort' } });
+        edit.effort = b.effort;
+      }
       if (Object.keys(edit).length === 0) {
         return reply.code(400).send({ error: { code: 'empty_edit' } });
       }
@@ -429,7 +437,16 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
     const unsubscribe = source.subscribeLogs(req.params.issueId, (ev) => {
       reply.raw.write(`data: ${JSON.stringify(ev)}\n\n`);
     });
-    req.raw.on('close', unsubscribe);
+    // Heartbeat so idle proxies don't drop a long, quiet log tail (parity with the board stream).
+    const ping = setInterval(() => reply.raw.write(': ping\n\n'), 20_000);
+    let cleaned = false;
+    const cleanup = (): void => {
+      if (cleaned) return;
+      cleaned = true;
+      clearInterval(ping);
+      unsubscribe();
+    };
+    req.raw.on('close', cleanup);
   });
 
   // ---- live board/state changes (SSE) ----

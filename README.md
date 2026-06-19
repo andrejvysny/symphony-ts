@@ -10,6 +10,30 @@ Docker, no database, no authentication — everything runs on your machine and s
 v1 targets Claude Code but is **agent-agnostic**: Codex CLI, opencode, and others plug in behind one
 `CodingAgentBackend` interface (hybrid — Claude Agent SDK for Claude, CLI stream-json for the rest).
 
+## Install
+
+```bash
+npm i -g @andrejvysny/symphony      # or: pnpm add -g @andrejvysny/symphony
+symphony --help
+```
+
+Prerequisites: **Node ≥ 22** and a local **`claude` login** (`~/.claude`; the default backend reuses
+it). Then:
+
+```bash
+symphony init                                    # write a starter WORKFLOW.md (optional)
+symphony --port 4500                             # dashboard at http://127.0.0.1:4500/
+symphony ticket create "Add dark mode" --state Todo
+```
+
+No `WORKFLOW.md` is required to start: `symphony --port 4500` runs with defaults and the dashboard
+prompts you to **create a project** (it writes the config back for you). `symphony init` just
+scaffolds a file to customize — see the annotated [`WORKFLOW.md.example`](./WORKFLOW.md.example).
+Activating a project from an externally hand-edited `WORKFLOW.md` requires a restart (or use the
+dashboard's project switcher, which re-points live).
+
+To hack on Symphony itself instead, build from source — see [Develop](#develop) below.
+
 ## Layout
 
 ```
