@@ -82,6 +82,10 @@ describe('WorkspaceManager (real git worktrees)', () => {
     const ws1 = await wm.createForIssue(i1);
     await writeFile(path.join(ws1.path, 'one.txt'), 'one\n');
     const git1 = (args: string[]) => execa('git', args, { cwd: ws1.path });
+    // The shared clone has no inherited identity (CI runners lack a global one); set it on the
+    // worktree (writes to the clone's common config) so the commit doesn't fail with empty ident.
+    await git1(['config', 'user.email', 'test@example.com']);
+    await git1(['config', 'user.name', 'Test']);
     await git1(['add', '.']);
     await git1(['commit', '-m', 'add one']);
     const res = await wm.integrate(i1);
@@ -103,6 +107,10 @@ describe('WorkspaceManager (real git worktrees)', () => {
     const ws1 = await wm.createForIssue(i1);
     await writeFile(path.join(ws1.path, 'one.txt'), 'one\n');
     const git1 = (args: string[]) => execa('git', args, { cwd: ws1.path });
+    // The shared clone has no inherited identity (CI runners lack a global one); set it on the
+    // worktree (writes to the clone's common config) so the commit doesn't fail with empty ident.
+    await git1(['config', 'user.email', 'test@example.com']);
+    await git1(['config', 'user.name', 'Test']);
     await git1(['add', '.']);
     await git1(['commit', '-m', 'add one']);
     expect(await wm.integrate(i1)).toEqual({ merged: false });
