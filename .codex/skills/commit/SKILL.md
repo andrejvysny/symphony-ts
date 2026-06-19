@@ -1,7 +1,6 @@
 ---
 name: commit
-description:
-  Create a well-formed git commit from current changes using session history for
+description: Create a well-formed git commit from current changes using session history for
   rationale and summary; use when asked to commit, prepare a commit message, or
   finalize staged work.
 ---

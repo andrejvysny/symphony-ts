@@ -1,7 +1,6 @@
 ---
 name: pull
-description:
-  Pull latest origin/main into the current local branch and resolve merge
+description: Pull latest origin/main into the current local branch and resolve merge
   conflicts (aka update-branch). Use when Codex needs to sync a feature branch
   with origin, perform a merge-based update (not rebase), and guide conflict
   resolution best practices.
