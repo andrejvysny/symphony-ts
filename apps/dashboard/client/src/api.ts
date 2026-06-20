@@ -6,6 +6,57 @@ export interface BoardStateDTO {
   color?: string;
 }
 export type IssueStatus = 'running' | 'blocked' | 'retrying' | 'paused' | 'idle';
+
+// ---- plan mode ----
+export type PlanStatus = 'planning' | 'awaiting_input' | 'ready' | 'approved' | 'failed';
+export interface PlanQuestionOption {
+  label: string;
+  description?: string;
+}
+export interface PlanQuestion {
+  id: string;
+  header: string;
+  question: string;
+  options?: PlanQuestionOption[];
+  multiSelect: boolean;
+}
+export interface PlanAsk {
+  id: string;
+  at: string;
+  questions: PlanQuestion[];
+  answers?: Record<string, string | string[]>;
+  answeredAt?: string;
+}
+export interface PlanTextAnchor {
+  exact: string;
+  prefix?: string;
+  suffix?: string;
+}
+export interface PlanComment {
+  id: string;
+  at: string;
+  anchor: PlanTextAnchor;
+  body: string;
+  resolved: boolean;
+  author: 'operator' | 'agent';
+}
+export interface PlanDTO {
+  status: PlanStatus;
+  markdown?: string;
+  editedByUser?: boolean;
+  sessionId?: string;
+  pendingAsk?: PlanAsk | null;
+  qa: PlanAsk[];
+  comments: PlanComment[];
+  revision: number;
+  /** Why the last plan run failed (set when status is 'failed'); shown in the UI. */
+  error?: string;
+  /** Classified failure category (e.g. 'auth_required') for a tailored hint. */
+  errorCategory?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface BoardIssueDTO {
   id: string;
   identifier: string;
@@ -17,6 +68,8 @@ export interface BoardIssueDTO {
   status: IssueStatus;
   createdAt: string | null;
   updatedAt: string | null;
+  /** Plan-mode status for the card badge; null when the ticket has no plan. */
+  plan_status: PlanStatus | null;
 }
 export interface BoardData {
   states: BoardStateDTO[];
@@ -61,6 +114,8 @@ export interface IssueDetailDTO {
   } | null;
   /** Absolute worktree path when it exists on disk (for "Open in VS Code"); null otherwise. */
   worktree_path: string | null;
+  /** Plan-mode artifact (generated plan + Q&A + comments); null until a plan run starts. */
+  plan: PlanDTO | null;
 }
 export interface TodoItem {
   content: string;
@@ -231,11 +286,30 @@ export interface SettingsDTO {
   };
   polling: { interval_ms: number };
   workspace: { branch_prefix: string; mode: string; merge_on_accept: boolean };
+  plan: { qa_mode: string };
 }
 export interface SettingsPatch {
   agent?: Partial<SettingsDTO['agent']>;
   polling?: { interval_ms?: number };
   workspace?: { branch_prefix?: string; mode?: string; merge_on_accept?: boolean };
+  plan?: { qa_mode?: string };
+}
+
+/**
+ * Read a plan-action result: the server returns the result object with 200 on success and 409 when
+ * the action is rejected (with a `reason`), so the caller can surface the reason inline rather than
+ * treating a rejection as a thrown error. Any other status throws.
+ */
+async function planResult<T>(res: Response): Promise<T> {
+  if (res.status === 200 || res.status === 409) return (await res.json()) as T;
+  let detail = res.statusText;
+  try {
+    const body = (await res.json()) as { error?: { message?: string; code?: string } };
+    detail = body.error?.message ?? body.error?.code ?? detail;
+  } catch {
+    /* ignore */
+  }
+  throw new Error(`${res.status}: ${detail}`);
 }
 
 async function jsonOrThrow<T>(res: Response): Promise<T> {
@@ -348,6 +422,60 @@ export const api = {
   terminateAll: () =>
     fetch('/api/v1/sessions/terminate-all', { method: 'POST' }).then((r) =>
       jsonOrThrow<{ terminated: number }>(r),
+    ),
+  // ---- plan mode ----
+  getPlan: (id: string) =>
+    fetch(`/api/v1/issues/${encodeURIComponent(id)}/plan`)
+      .then((r) => jsonOrThrow<{ plan: PlanDTO | null }>(r))
+      .then((x) => x.plan),
+  startPlan: (id: string, instructions?: string) =>
+    fetch(`/api/v1/issues/${encodeURIComponent(id)}/plan`, {
+      method: 'POST',
+      ...(instructions && instructions.trim()
+        ? {
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ instructions: instructions.trim() }),
+          }
+        : {}),
+    }).then((r) => planResult<{ started: boolean; reason?: string }>(r)),
+  answerPlanQuestion: (id: string, askId: string, answers: Record<string, string | string[]>) =>
+    fetch(`/api/v1/issues/${encodeURIComponent(id)}/plan/answer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ askId, answers }),
+    }).then((r) => planResult<{ ok: boolean; reason?: string }>(r)),
+  revisePlan: (id: string) =>
+    fetch(`/api/v1/issues/${encodeURIComponent(id)}/plan/revise`, { method: 'POST' }).then((r) =>
+      planResult<{ ok: boolean; reason?: string }>(r),
+    ),
+  editPlan: (id: string, markdown: string) =>
+    fetch(`/api/v1/issues/${encodeURIComponent(id)}/plan/markdown`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ markdown }),
+    }).then((r) => planResult<{ ok: boolean; reason?: string }>(r)),
+  addPlanComment: (id: string, anchor: PlanTextAnchor, body: string) =>
+    fetch(`/api/v1/issues/${encodeURIComponent(id)}/plan/comments`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ anchor, body }),
+    }).then((r) => jsonOrThrow<{ id: string }>(r)),
+  resolvePlanComment: (id: string, commentId: string, resolved: boolean) =>
+    fetch(
+      `/api/v1/issues/${encodeURIComponent(id)}/plan/comments/${encodeURIComponent(commentId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ resolved }),
+      },
+    ).then((r) => jsonOrThrow<{ ok: boolean }>(r)),
+  approvePlan: (id: string) =>
+    fetch(`/api/v1/issues/${encodeURIComponent(id)}/plan/approve`, { method: 'POST' }).then((r) =>
+      planResult<{ approved: boolean; reason?: string }>(r),
+    ),
+  cancelPlan: (id: string) =>
+    fetch(`/api/v1/issues/${encodeURIComponent(id)}/plan/cancel`, { method: 'POST' }).then((r) =>
+      jsonOrThrow<{ cancelled: boolean }>(r),
     ),
   /** Poke the orchestrator to poll + dispatch immediately (rate-limited server-side). */
   refresh: () => fetch('/api/v1/refresh', { method: 'POST' }).then((r) => r.ok),

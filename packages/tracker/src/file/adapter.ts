@@ -1,4 +1,4 @@
-import type { IssueStateRef, NormalizedIssue } from '@symphony/shared';
+import type { IssuePlan, IssueStateRef, NormalizedIssue } from '@symphony/shared';
 import type {
   ActivityReader,
   BoardReader,
@@ -10,6 +10,7 @@ import type {
   IssueRemover,
   IssueWriter,
   LabelInfo,
+  PlanStore,
   Tracker,
   UploadInput,
   WorkflowStateInfo,
@@ -78,7 +79,14 @@ function now(): string {
  * single-writer paths (SDK tools in-process, CLI tools via the bridge), all funneling here.
  */
 export class FileTracker
-  implements Tracker, IssueCreator, BoardReader, IssueWriter, IssueRemover, ActivityReader
+  implements
+    Tracker,
+    IssueCreator,
+    BoardReader,
+    IssueWriter,
+    IssueRemover,
+    ActivityReader,
+    PlanStore
 {
   readonly kind = 'file';
   readonly store: FileStore;
@@ -132,6 +140,9 @@ export class FileTracker
             },
           }
         : {}),
+      // The stored plan is zod-validated against the same shape as IssuePlan; its optional fields infer
+      // as `T | undefined` (vs IssuePlan's `T`), so cast at this boundary rather than re-map every field.
+      ...(s.plan !== undefined ? { plan: s.plan as IssuePlan } : {}),
     };
   }
 
@@ -318,6 +329,26 @@ export class FileTracker
   async getIssue(id: string): Promise<NormalizedIssue | null> {
     const s = await this.store.readIssue(id);
     return s ? FileTracker.toNormalized(s) : null;
+  }
+
+  // ---- PlanStore ----
+  async updatePlan(
+    issueId: string,
+    fn: (prev: IssuePlan | undefined) => IssuePlan,
+  ): Promise<IssuePlan> {
+    let result: IssuePlan | undefined;
+    await this.store.mutateIssue(issueId, (issue) => {
+      const next = fn(issue.plan as IssuePlan | undefined);
+      result = next;
+      return { ...issue, plan: next, updatedAt: now() };
+    });
+    // mutateIssue always invokes fn, so result is set (it throws if the issue is missing).
+    return result as IssuePlan;
+  }
+
+  async getPlan(issueId: string): Promise<IssuePlan | null> {
+    const s = await this.store.readIssue(issueId);
+    return s?.plan !== undefined ? (s.plan as IssuePlan) : null;
   }
 
   // ---- ActivityReader ----

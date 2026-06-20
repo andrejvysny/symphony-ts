@@ -188,6 +188,34 @@ The **Backlog** lane (leftmost) holds tickets that aren't ready yet — the orch
 dispatches them. Drag a ticket to **Todo** when it's ready to be worked. The agent drawer (Agents
 tab → a running agent) can be **dragged wider** from its left edge (double-click the edge to reset).
 
+## Plan mode (read-only planning before implementation)
+
+A **Backlog** ticket card has a **📋 Plan** button (claude-sdk backend only). It runs a **read-only**
+planning agent (`permissionMode:'plan'`) that investigates the repo and produces a markdown plan — the
+ticket **never leaves Backlog** during this. A status badge tracks it: `planning…` → `needs input` →
+`plan ready` → `approved`.
+
+In the plan panel you can:
+
+- **Answer questions** — when the agent needs a decision it asks via the `symphony_ask` tool, surfaced
+  as a question card (options + a free-text "Other"). The Q&A mode is set in **Settings → Plan mode**:
+  `live` (the agent waits in-session; your answer continues it instantly — it holds an agent slot while
+  you think) or `pause` (the ticket parks as "needs input" and the agent's session resumes on answer).
+- **Comment** — select any text in the rendered plan to anchor a comment to it; resolve/reopen from the
+  sidebar.
+- **Edit** — toggle to edit the plan markdown directly and save.
+- **Request revision** — re-runs the agent to revise the plan, addressing your unresolved comments. A
+  revision that rewrites the text a comment was anchored to drops that orphaned comment.
+- **Approve & move to Todo** — moves the ticket into the entry lane; the approved plan markdown is then
+  injected into the implementation agent's prompt so it follows the agreed approach. (Approve is allowed
+  once a plan is `ready`; unresolved comments only warn, they don't block.)
+
+Plan runs share the `max_concurrent_agents` budget, fold their tokens into the ticket's usage, and
+write a durable `events.jsonl` under `logs_root/<identifier>/plan/`. **Restart caveat:** a `live`-mode
+question that's open when the orchestrator restarts loses its in-memory wait — the ticket stays at
+`needs input`; click **Cancel plan** then **Plan** again to restart, or use **pause** mode (which
+resumes from the agent's session).
+
 ## Troubleshooting / known gotchas
 
 | Symptom                            | Likely cause                                           | Fix                                                                                                                                                                                   |

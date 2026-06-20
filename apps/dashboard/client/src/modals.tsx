@@ -267,6 +267,8 @@ export function TicketModal(props: {
   onChanged: () => void;
   /** Jump to the live agent view for this ticket (shown only while a session is running). */
   onViewRunningAgent?: (issueId: string) => void;
+  /** Open the read-only Plan panel for this ticket (shown only for Backlog tickets). */
+  onOpenPlan?: (issue: BoardIssueDTO) => void;
 }) {
   const i = props.issue;
   const [detail, setDetail] = useState<IssueDetailDTO | null>(null);
@@ -768,6 +770,26 @@ export function TicketModal(props: {
           </div>
 
           <div class="ticket-side">
+            {props.meta && i.state === props.meta.backlog_state && props.onOpenPlan && (
+              <button
+                class="btn block plan-cta"
+                data-test="plan-button"
+                title="Investigate read-only and draft an implementation plan to review before implementing"
+                onClick={() => props.onOpenPlan?.(i)}
+              >
+                <span class="plan-cta-ic" aria-hidden="true">
+                  📋
+                </span>
+                <span class="plan-cta-text">
+                  {i.plan_status && i.plan_status !== 'failed' ? 'Open plan' : 'Plan this ticket'}
+                </span>
+                {i.plan_status && (
+                  <span class={`plan-badge ${i.plan_status}`}>
+                    {i.plan_status.replace('_', ' ')}
+                  </span>
+                )}
+              </button>
+            )}
             {isRunning && props.onViewRunningAgent ? (
               <button
                 class="btn primary block dispatch-btn"

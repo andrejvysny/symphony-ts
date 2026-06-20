@@ -8,6 +8,7 @@ import {
   supportsIssueCreation,
   supportsIssueRemoval,
   supportsIssueWriter,
+  supportsPlanStore,
 } from '../tracker.js';
 import { FileTracker, type FileTrackerOptions, seedStates } from './adapter.js';
 
@@ -72,7 +73,65 @@ describe('FileTracker', () => {
     expect(supportsBoard(t)).toBe(true);
     expect(supportsIssueWriter(t)).toBe(true);
     expect(supportsActivity(t)).toBe(true);
+    expect(supportsPlanStore(t)).toBe(true);
     expect(t.kind).toBe('file');
+  });
+
+  it('persists a plan artifact via updatePlan and survives a reload (round-trip)', async () => {
+    const t = make({ backlogState: 'Backlog' });
+    const issue = await t.createIssue({ title: 'plan me', stateName: 'Backlog' });
+    expect(await t.getPlan(issue.id)).toBeNull();
+
+    // First write: planning status, no markdown yet.
+    await t.updatePlan(issue.id, (prev) => {
+      expect(prev).toBeUndefined();
+      return {
+        status: 'planning',
+        qa: [],
+        comments: [],
+        revision: 0,
+        createdAt: 'c',
+        updatedAt: 'u',
+      };
+    });
+
+    // Second write: a question batch goes pending, then markdown is submitted.
+    await t.updatePlan(issue.id, (prev) => ({
+      ...prev!,
+      status: 'awaiting_input',
+      pendingAsk: {
+        id: 'a1',
+        at: 't',
+        questions: [
+          {
+            id: 'q1',
+            header: 'Scope',
+            question: 'Which?',
+            options: [{ label: 'A' }],
+            multiSelect: false,
+          },
+        ],
+      },
+    }));
+    await t.updatePlan(issue.id, (prev) => ({
+      ...prev!,
+      status: 'ready',
+      markdown: '# Plan\n\nstep 1',
+      pendingAsk: null,
+      qa: [{ id: 'a1', at: 't', questions: [], answers: { q1: 'A' }, answeredAt: 't2' }],
+      revision: 1,
+    }));
+
+    // Reload from disk through a fresh tracker → the normalized issue + getPlan reflect the writes.
+    const reloaded = make({ backlogState: 'Backlog' });
+    const plan = await reloaded.getPlan(issue.id);
+    expect(plan?.status).toBe('ready');
+    expect(plan?.markdown).toBe('# Plan\n\nstep 1');
+    expect(plan?.pendingAsk).toBeNull();
+    expect(plan?.qa[0]?.answers).toEqual({ q1: 'A' });
+    const normalized = (await reloaded.fetchAllIssues()).find((i) => i.id === issue.id);
+    expect(normalized?.plan?.markdown).toBe('# Plan\n\nstep 1');
+    expect(normalized?.state).toBe('Backlog'); // plan writes never moved the ticket
   });
 
   it('additively adds a newly-configured Backlog lane to an existing project (leftmost, idempotent)', async () => {

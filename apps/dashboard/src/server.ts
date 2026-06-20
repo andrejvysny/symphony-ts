@@ -10,6 +10,7 @@ import type {
   CreateTicketInput,
   DashboardSource,
   IssueEditInput,
+  PlanTextAnchor,
   SettingsPatch,
   UpdateProjectInput,
 } from '@symphony/core';
@@ -416,6 +417,135 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
       }
     },
   );
+
+  // ---- plan mode (read-only "Plan" track on Backlog tickets) ----
+
+  app.get<{ Params: { id: string } }>('/api/v1/issues/:id/plan', async (req, reply) => {
+    try {
+      return reply.send({ plan: await source.getPlan(req.params.id) });
+    } catch (e) {
+      return reply
+        .code(503)
+        .send({ error: { code: 'plan_unavailable', message: (e as Error).message } });
+    }
+  });
+
+  app.post<{ Params: { id: string }; Body: { instructions?: string } }>(
+    '/api/v1/issues/:id/plan',
+    async (req, reply) => {
+      try {
+        const raw = typeof req.body?.instructions === 'string' ? req.body.instructions.trim() : '';
+        const r = await source.startPlan(req.params.id, raw.length > 0 ? raw : undefined);
+        return reply.code(r.started ? 200 : 409).send(r);
+      } catch (e) {
+        return reply
+          .code(502)
+          .send({ error: { code: 'plan_start_failed', message: (e as Error).message } });
+      }
+    },
+  );
+
+  app.post<{
+    Params: { id: string };
+    Body: { askId?: string; answers?: Record<string, string | string[]> };
+  }>('/api/v1/issues/:id/plan/answer', async (req, reply) => {
+    const askId = req.body?.askId;
+    const answers = req.body?.answers;
+    if (!askId || typeof answers !== 'object' || answers === null)
+      return reply.code(400).send({ error: { code: 'missing_answer' } });
+    try {
+      const r = await source.answerPlanQuestion(req.params.id, askId, answers);
+      return reply.code(r.ok ? 200 : 409).send(r);
+    } catch (e) {
+      return reply
+        .code(502)
+        .send({ error: { code: 'plan_answer_failed', message: (e as Error).message } });
+    }
+  });
+
+  app.post<{ Params: { id: string } }>('/api/v1/issues/:id/plan/revise', async (req, reply) => {
+    try {
+      const r = await source.revisePlan(req.params.id);
+      return reply.code(r.ok ? 200 : 409).send(r);
+    } catch (e) {
+      return reply
+        .code(502)
+        .send({ error: { code: 'plan_revise_failed', message: (e as Error).message } });
+    }
+  });
+
+  app.put<{ Params: { id: string }; Body: { markdown?: string } }>(
+    '/api/v1/issues/:id/plan/markdown',
+    async (req, reply) => {
+      const markdown = req.body?.markdown;
+      if (typeof markdown !== 'string')
+        return reply.code(400).send({ error: { code: 'missing_markdown' } });
+      try {
+        const r = await source.editPlan(req.params.id, markdown);
+        return reply.code(r.ok ? 200 : 409).send(r);
+      } catch (e) {
+        return reply
+          .code(502)
+          .send({ error: { code: 'plan_edit_failed', message: (e as Error).message } });
+      }
+    },
+  );
+
+  app.post<{
+    Params: { id: string };
+    Body: { anchor?: PlanTextAnchor; body?: string };
+  }>('/api/v1/issues/:id/plan/comments', async (req, reply) => {
+    const anchor = req.body?.anchor;
+    const body = req.body?.body;
+    if (!anchor || typeof anchor.exact !== 'string' || !body || !body.trim())
+      return reply.code(400).send({ error: { code: 'invalid_comment' } });
+    try {
+      return reply.code(201).send(await source.addPlanComment(req.params.id, anchor, body));
+    } catch (e) {
+      return reply
+        .code(502)
+        .send({ error: { code: 'plan_comment_failed', message: (e as Error).message } });
+    }
+  });
+
+  app.patch<{ Params: { id: string; commentId: string }; Body: { resolved?: boolean } }>(
+    '/api/v1/issues/:id/plan/comments/:commentId',
+    async (req, reply) => {
+      const resolved = req.body?.resolved;
+      if (typeof resolved !== 'boolean')
+        return reply.code(400).send({ error: { code: 'missing_resolved' } });
+      try {
+        return reply.send(
+          await source.resolvePlanComment(req.params.id, req.params.commentId, resolved),
+        );
+      } catch (e) {
+        return reply
+          .code(502)
+          .send({ error: { code: 'plan_resolve_failed', message: (e as Error).message } });
+      }
+    },
+  );
+
+  app.post<{ Params: { id: string } }>('/api/v1/issues/:id/plan/approve', async (req, reply) => {
+    try {
+      const r = await source.approvePlan(req.params.id);
+      return reply.code(r.approved ? 200 : 409).send(r);
+    } catch (e) {
+      return reply
+        .code(502)
+        .send({ error: { code: 'plan_approve_failed', message: (e as Error).message } });
+    }
+  });
+
+  app.post<{ Params: { id: string } }>('/api/v1/issues/:id/plan/cancel', async (req, reply) => {
+    try {
+      return reply.send(await source.cancelPlan(req.params.id));
+    } catch (e) {
+      return reply
+        .code(502)
+        .send({ error: { code: 'plan_cancel_failed', message: (e as Error).message } });
+    }
+  });
 
   app.post<{ Params: { issueId: string } }>('/api/v1/sessions/:issueId/terminate', async (req) =>
     source.terminate(req.params.issueId),

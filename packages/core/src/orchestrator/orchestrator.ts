@@ -1,16 +1,40 @@
+import { randomUUID } from 'node:crypto';
 import {
   AGENT_DEFS,
+  buildPlanSdkMcpServer,
   detectAgent,
   type AgentEvent,
+  type AskQuestionInput,
   type CodingAgentBackend,
   type McpConfig,
+  type PlanToolDeps,
 } from '@symphony/agent-backends';
-import type { ErrorCategory, IssueUsage, NormalizedIssue } from '@symphony/shared';
-import { type Tracker, supportsBoard, supportsIssueWriter } from '@symphony/tracker';
+import type {
+  ErrorCategory,
+  IssuePlan,
+  IssueUsage,
+  NormalizedIssue,
+  PlanAsk,
+  PlanComment,
+  PlanQuestion,
+  PlanTextAnchor,
+} from '@symphony/shared';
+import {
+  type Tracker,
+  supportsBoard,
+  supportsIssueWriter,
+  supportsPlanStore,
+} from '@symphony/tracker';
 import type { SymphonyConfig } from '../config/resolve.js';
 import { dispatchPreflight } from '../config/validate.js';
 import { type Logger, noopLogger } from '../observability/logger.js';
 import { PromptBuilder } from '../prompt/builder.js';
+import {
+  formatPlanAnswers,
+  planAnswersPrompt,
+  planInitialPrompt,
+  planRevisionPrompt,
+} from '../prompt/plan-prompt.js';
 import type { IWorkspaceManager } from '../workspace/manager.js';
 import {
   hasRequiredFields,
@@ -18,11 +42,13 @@ import {
   sortForDispatch,
   todoBlockedByNonTerminal,
 } from './dispatch.js';
+import { runPlanWorker, type PlanOutcome, type PlanRunControl } from './plan-worker.js';
 import {
   createState,
   EVENT_BUFFER_CAP,
   newRunningEntry,
   type OrchestratorState,
+  type PlanRunEntry,
   type RunningEntry,
 } from './state.js';
 import { integrateUsage } from './token-accounting.js';
@@ -249,6 +275,8 @@ export class Orchestrator {
     for (const r of this.state.retryAttempts.values()) clearTimeout(r.timer);
     this.state.retryAttempts.clear();
     for (const entry of this.state.running.values()) entry.abort.abort();
+    for (const entry of this.state.planRuns.values()) entry.run.abort.abort();
+    this.rejectAllPendingAsks('orchestrator stopping');
     await this.queue.catch(() => undefined);
   }
 
@@ -331,6 +359,471 @@ export class Orchestrator {
     });
   }
 
+  // ---- plan mode (read-only "Plan" track on Backlog tickets) ----
+
+  /** A plan run's current artifact for the dashboard (null when none / tracker has no plan store). */
+  async getPlan(issueId: string): Promise<IssuePlan | null> {
+    const tracker = this.tracker;
+    return supportsPlanStore(tracker) ? tracker.getPlan(issueId) : null;
+  }
+
+  /** Test seam: the live plan run's tool executors (so tests can drive symphony_ask/submit_plan). */
+  planRunDepsForTest(issueId: string): PlanToolDeps | undefined {
+    return this.state.planRuns.get(issueId)?.deps;
+  }
+
+  /**
+   * Launch a read-only planning run on a Backlog ticket. `customInstructions` is the operator's
+   * optional free-text steer from the dashboard, folded into the agent's first-turn prompt.
+   */
+  async startPlan(
+    issueId: string,
+    customInstructions?: string,
+  ): Promise<{ started: boolean; reason?: string }> {
+    return this.enqueue(async () => {
+      const gate = this.planPreconditions();
+      if (gate) return { started: false, reason: gate };
+      if (this.state.planRuns.has(issueId))
+        return { started: false, reason: 'a plan run is already active' };
+      if (this.availableSlots() <= 0) return { started: false, reason: 'no available agent slot' };
+      const issue = await this.findIssueById(issueId);
+      if (!issue) return { started: false, reason: 'issue not found' };
+      const backlog = this.config.tracker.backlog_state;
+      if (backlog && issue.state !== backlog)
+        return { started: false, reason: `plan is only available for ${backlog} tickets` };
+      await this.persistPlan(issueId, (p) => ({
+        ...this.clearedPlan(p),
+        status: 'planning',
+        pendingAsk: null,
+      }));
+      this.resume(issueId);
+      this.dispatchPlan(issue, { prompt: planInitialPrompt(issue, customInstructions) });
+      return { started: true };
+    });
+  }
+
+  /** Answer the plan run's pending question (live → resume in-session; pause → re-dispatch). */
+  async answerPlanQuestion(
+    issueId: string,
+    askId: string,
+    answers: Record<string, string | string[]>,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    return this.enqueue(async () => {
+      const tracker = this.tracker;
+      if (!supportsPlanStore(tracker))
+        return { ok: false, reason: 'tracker does not support plans' };
+      let matched: PlanQuestion[] | undefined;
+      const updated = await this.persistPlan(issueId, (p) => {
+        const base = this.basePlan(p);
+        if (!base.pendingAsk || base.pendingAsk.id !== askId) return base; // stale / no pending → no-op
+        matched = base.pendingAsk.questions;
+        const answered: PlanAsk = {
+          ...base.pendingAsk,
+          answers,
+          answeredAt: new Date(this.now()).toISOString(),
+        };
+        return { ...base, status: 'planning', pendingAsk: null, qa: [...base.qa, answered] };
+      });
+      if (!matched) return { ok: false, reason: 'no matching pending question' };
+      // Live mode: the agent's symphony_ask is blocked on a promise — resolve it to continue in-session.
+      const pending = this.state.pendingAsks.get(askId);
+      if (pending) {
+        this.state.pendingAsks.delete(askId);
+        pending.resolve(formatPlanAnswers(matched, answers));
+        this.emitBoardChanged();
+        return { ok: true };
+      }
+      // Pause mode: the run ended when it asked — re-dispatch, resuming the session with the answers.
+      if (this.state.planRuns.has(issueId)) return { ok: false, reason: 'plan run still active' };
+      if (this.availableSlots() <= 0)
+        return { ok: false, reason: 'no available agent slot to resume' };
+      const issue = await this.findIssueById(issueId);
+      if (!issue) return { ok: false, reason: 'issue not found' };
+      const sessionId = updated?.sessionId;
+      this.dispatchPlan(issue, {
+        prompt: planAnswersPrompt(issue, matched, answers),
+        ...(sessionId !== undefined ? { resumeSessionId: sessionId } : {}),
+      });
+      this.emitBoardChanged();
+      return { ok: true };
+    });
+  }
+
+  /** Re-run the plan agent to revise the plan, addressing the operator's open comments. */
+  async revisePlan(issueId: string): Promise<{ ok: boolean; reason?: string }> {
+    return this.enqueue(async () => {
+      const tracker = this.tracker;
+      if (!supportsPlanStore(tracker))
+        return { ok: false, reason: 'tracker does not support plans' };
+      if (this.state.planRuns.has(issueId))
+        return { ok: false, reason: 'a plan run is already active' };
+      if (this.availableSlots() <= 0) return { ok: false, reason: 'no available agent slot' };
+      const plan = await tracker.getPlan(issueId);
+      if (!plan?.markdown) return { ok: false, reason: 'no plan to revise' };
+      const issue = await this.findIssueById(issueId);
+      if (!issue) return { ok: false, reason: 'issue not found' };
+      const unresolved = plan.comments.filter((c) => !c.resolved);
+      await this.persistPlan(issueId, (p) => ({ ...this.clearedPlan(p), status: 'planning' }));
+      this.dispatchPlan(issue, {
+        prompt: planRevisionPrompt(issue, unresolved),
+        ...(plan.sessionId !== undefined ? { resumeSessionId: plan.sessionId } : {}),
+      });
+      return { ok: true };
+    });
+  }
+
+  /** Persist an operator's direct edit to the plan markdown. */
+  async editPlan(issueId: string, markdown: string): Promise<{ ok: boolean; reason?: string }> {
+    return this.enqueue(async () => {
+      if (!supportsPlanStore(this.tracker))
+        return { ok: false, reason: 'tracker does not support plans' };
+      if (this.state.planRuns.has(issueId))
+        return { ok: false, reason: 'cannot edit while a plan run is active' };
+      await this.persistPlan(issueId, (p) => {
+        const base = this.basePlan(p);
+        return {
+          ...base,
+          markdown,
+          editedByUser: true,
+          status: base.status === 'approved' ? 'approved' : 'ready',
+        };
+      });
+      this.emitBoardChanged();
+      return { ok: true };
+    });
+  }
+
+  /** Add an operator comment anchored to a span of the plan markdown. */
+  async addPlanComment(
+    issueId: string,
+    anchor: PlanTextAnchor,
+    body: string,
+  ): Promise<{ id: string }> {
+    return this.enqueue(async () => {
+      const id = randomUUID();
+      await this.persistPlan(issueId, (p) => {
+        const base = this.basePlan(p);
+        const comment: PlanComment = {
+          id,
+          at: new Date(this.now()).toISOString(),
+          anchor,
+          body,
+          resolved: false,
+          author: 'operator',
+        };
+        return { ...base, comments: [...base.comments, comment] };
+      });
+      this.emitBoardChanged();
+      return { id };
+    });
+  }
+
+  /** Resolve / reopen a plan comment. */
+  async resolvePlanComment(
+    issueId: string,
+    commentId: string,
+    resolved: boolean,
+  ): Promise<{ ok: boolean }> {
+    return this.enqueue(async () => {
+      await this.persistPlan(issueId, (p) => {
+        const base = this.basePlan(p);
+        return {
+          ...base,
+          comments: base.comments.map((c) => (c.id === commentId ? { ...c, resolved } : c)),
+        };
+      });
+      this.emitBoardChanged();
+      return { ok: true };
+    });
+  }
+
+  /** Approve a ready plan: move the ticket Backlog → entry lane so normal dispatch picks it up. */
+  async approvePlan(issueId: string): Promise<{ approved: boolean; reason?: string }> {
+    return this.enqueue(async () => {
+      const tracker = this.tracker;
+      if (!supportsPlanStore(tracker))
+        return { approved: false, reason: 'tracker does not support plans' };
+      if (this.state.planRuns.has(issueId))
+        return { approved: false, reason: 'a plan run is still active' };
+      const plan = await tracker.getPlan(issueId);
+      if (!plan) return { approved: false, reason: 'no plan' };
+      if (plan.pendingAsk) return { approved: false, reason: 'answer the pending question first' };
+      if (!plan.markdown) return { approved: false, reason: 'no plan to approve' };
+      await this.persistPlan(issueId, (p) => ({
+        ...this.basePlan(p),
+        status: 'approved',
+        pendingAsk: null,
+      }));
+      const target = this.config.tracker.active_states[0];
+      if (target && supportsIssueWriter(this.tracker)) {
+        try {
+          await this.tracker.updateIssueState(issueId, target);
+        } catch (e) {
+          this.logger.warn(
+            { issue_id: issueId, error: String(e) },
+            'approve: move to entry lane failed',
+          );
+        }
+      }
+      this.resume(issueId);
+      this.scheduleTick(0);
+      return { approved: true };
+    });
+  }
+
+  /** Abort a live plan run (or clear a parked/awaiting plan when no run is active). */
+  async cancelPlan(issueId: string): Promise<{ cancelled: boolean }> {
+    return this.enqueue(async () => {
+      this.rejectPendingAsksFor(issueId, 'plan cancelled');
+      const entry = this.state.planRuns.get(issueId);
+      if (entry) {
+        entry.run.abort.abort(); // onPlanWorkerExit finalizes status
+        return { cancelled: true };
+      }
+      await this.persistPlan(issueId, (p) =>
+        p
+          ? { ...this.clearedPlan(p), status: p.markdown ? 'ready' : 'failed', pendingAsk: null }
+          : this.basePlan(p),
+      );
+      this.emitBoardChanged();
+      return { cancelled: false };
+    });
+  }
+
+  // ---- plan run internals ----
+
+  private planPreconditions(): string | null {
+    if (this.config.agent.backend !== 'claude-sdk')
+      return 'plan mode requires the claude-sdk backend';
+    if (!supportsPlanStore(this.tracker)) return 'the active tracker does not support plans';
+    return null;
+  }
+
+  /** A fresh base plan when none exists yet; returns the existing plan unchanged otherwise. */
+  private basePlan(p: IssuePlan | undefined): IssuePlan {
+    if (p) return p;
+    const ts = new Date(this.now()).toISOString();
+    return { status: 'planning', qa: [], comments: [], revision: 0, createdAt: ts, updatedAt: ts };
+  }
+
+  /** Like {@link basePlan}, but drops a prior failure's error fields — used when (re)starting a run. */
+  private clearedPlan(p: IssuePlan | undefined): IssuePlan {
+    const base = { ...this.basePlan(p) };
+    delete base.error;
+    delete base.errorCategory;
+    return base;
+  }
+
+  /** Read-modify-write the issue's plan (best-effort; no-op if the tracker has no plan store). */
+  private async persistPlan(
+    issueId: string,
+    fn: (p: IssuePlan | undefined) => IssuePlan,
+  ): Promise<IssuePlan | undefined> {
+    const tracker = this.tracker;
+    if (!supportsPlanStore(tracker)) return undefined;
+    try {
+      return await tracker.updatePlan(issueId, fn);
+    } catch (e) {
+      this.logger.warn({ issue_id: issueId, error: String(e) }, 'failed to persist plan');
+      return undefined;
+    }
+  }
+
+  private async findIssueById(issueId: string): Promise<NormalizedIssue | undefined> {
+    const tracker = this.tracker;
+    if (!supportsBoard(tracker)) return undefined;
+    return (await tracker.fetchAllIssues().catch(() => [])).find((i) => i.id === issueId);
+  }
+
+  private rejectPendingAsksFor(issueId: string, reason: string): void {
+    for (const [askId, p] of this.state.pendingAsks) {
+      if (p.issueId !== issueId) continue;
+      this.state.pendingAsks.delete(askId);
+      try {
+        p.reject(new Error(reason));
+      } catch {
+        /* an already-settled promise must not break teardown */
+      }
+    }
+  }
+
+  private rejectAllPendingAsks(reason: string): void {
+    for (const [, p] of this.state.pendingAsks) {
+      try {
+        p.reject(new Error(reason));
+      } catch {
+        /* ignore */
+      }
+    }
+    this.state.pendingAsks.clear();
+  }
+
+  /** Launch a plan run: build the per-run plan MCP server (closures over this run) and stream it. */
+  private dispatchPlan(
+    issue: NormalizedIssue,
+    opts: { prompt: string; resumeSessionId?: string },
+  ): void {
+    const run = newRunningEntry(issue, 0, this.now());
+    const control: PlanRunControl = { submitted: false, parkedAskId: null };
+    const entry: PlanRunEntry = { run, control, mode: this.config.plan.qa_mode };
+    this.state.planRuns.set(issue.id, entry);
+
+    const deps: PlanToolDeps = {
+      ask: (questions) => this.onPlanAsk(issue.id, entry, questions),
+      submitPlan: (markdown) => this.onPlanSubmit(issue.id, entry, markdown),
+    };
+    entry.deps = deps;
+    const planMcp: McpConfig = { sdkServers: () => buildPlanSdkMcpServer(deps) };
+
+    const log = this.logger.child({ issue_id: issue.id, issue_identifier: issue.identifier });
+    log.info({ ...(opts.resumeSessionId ? { resuming: true } : {}) }, 'dispatching plan run');
+
+    const ctx = {
+      issue,
+      prompt: opts.prompt,
+      signal: run.abort.signal,
+      emit: (ev: AgentEvent) => this.onAgentEvent(run, ev),
+      onSession: (sid: string) => {
+        run.sessionId = sid;
+      },
+      onWorktree: (p: string) => {
+        run.workspacePath = p;
+      },
+      control,
+      ...(opts.resumeSessionId !== undefined ? { resumeSessionId: opts.resumeSessionId } : {}),
+    };
+
+    void runPlanWorker(
+      {
+        workspaceManager: this.workspaceManager,
+        backend: this.backend,
+        config: this.config,
+        mcpConfig: planMcp,
+      },
+      ctx,
+    ).then(
+      (outcome) => this.enqueue(() => this.onPlanWorkerExit(issue.id, outcome)),
+      (err) =>
+        this.enqueue(() => this.onPlanWorkerExit(issue.id, { kind: 'failed', error: String(err) })),
+    );
+  }
+
+  /** Executor for the agent's `symphony_ask` tool: persist the question, then block (live) or park (pause). */
+  private async onPlanAsk(
+    issueId: string,
+    entry: PlanRunEntry,
+    questions: AskQuestionInput[],
+  ): Promise<string> {
+    const askId = randomUUID();
+    const planQuestions: PlanQuestion[] = questions.map((q) => ({
+      id: randomUUID(),
+      header: q.header,
+      question: q.question,
+      multiSelect: q.multiSelect ?? false,
+      ...(q.options !== undefined
+        ? {
+            options: q.options.map((o) => ({
+              label: o.label,
+              ...(o.description !== undefined ? { description: o.description } : {}),
+            })),
+          }
+        : {}),
+    }));
+    const ask: PlanAsk = {
+      id: askId,
+      at: new Date(this.now()).toISOString(),
+      questions: planQuestions,
+    };
+    await this.persistPlan(issueId, (p) => ({
+      ...this.basePlan(p),
+      status: 'awaiting_input',
+      pendingAsk: ask,
+    }));
+    this.emitBoardChanged();
+    if (entry.mode === 'live') {
+      return new Promise<string>((resolve, reject) => {
+        this.state.pendingAsks.set(askId, { issueId, resolve, reject });
+      });
+    }
+    // Pause mode: record, return the tool result, then end the run on the next tick so the transcript
+    // stays well-formed (tool_use + tool_result) and the session resumes cleanly on answer.
+    entry.control.parkedAskId = askId;
+    setTimeout(() => entry.run.abort.abort(), 0);
+    return 'Questions recorded. Stop here — the operator will answer, then you will be re-prompted with their answers.';
+  }
+
+  /** Executor for the agent's `symphony_submit_plan` tool: persist the plan, then end the run. */
+  private async onPlanSubmit(
+    issueId: string,
+    entry: PlanRunEntry,
+    markdown: string,
+  ): Promise<string> {
+    await this.persistPlan(issueId, (p) => {
+      const base = this.basePlan(p);
+      return {
+        ...base,
+        status: 'ready',
+        markdown,
+        editedByUser: false,
+        pendingAsk: null,
+        revision: base.revision + 1,
+        // A revision can rewrite the text a comment was anchored to; drop those orphaned comments
+        // silently (the anchor's exact quote no longer appears in the new plan).
+        comments: base.comments.filter((c) => markdown.includes(c.anchor.exact)),
+      };
+    });
+    entry.control.submitted = true;
+    this.emitBoardChanged();
+    setTimeout(() => entry.run.abort.abort(), 0);
+    return 'Plan recorded for operator review.';
+  }
+
+  private async onPlanWorkerExit(issueId: string, outcome: PlanOutcome): Promise<void> {
+    const entry = this.state.planRuns.get(issueId);
+    if (!entry) return;
+    this.state.planRuns.delete(issueId);
+    this.rejectPendingAsksFor(issueId, 'plan run ended');
+    this.state.totals.secondsRunning += (this.now() - entry.run.startedAt) / 1000;
+    const log = this.logger.child({ issue_id: issueId, issue_identifier: entry.run.identifier });
+    // Fold plan-run tokens into the ticket's usage (best-effort), same path as execution runs.
+    await this.persistUsage(entry.run, log);
+    // Carry the session forward for revisions / pause-mode resume.
+    if (entry.run.sessionId) {
+      const sid = entry.run.sessionId;
+      await this.persistPlan(issueId, (p) => ({ ...this.basePlan(p), sessionId: sid }));
+    }
+    switch (outcome.kind) {
+      case 'ready':
+        log.info({}, 'plan ready for review');
+        break;
+      case 'parked':
+        log.info({}, 'plan parked for operator input (pause mode)');
+        break;
+      case 'aborted':
+        await this.persistPlan(issueId, (p) => ({
+          ...this.basePlan(p),
+          status: p?.markdown ? 'ready' : 'failed',
+          pendingAsk: null,
+        }));
+        log.info({}, 'plan run aborted/cancelled');
+        break;
+      case 'failed':
+        await this.persistPlan(issueId, (p) => ({
+          ...this.clearedPlan(p),
+          status: 'failed',
+          pendingAsk: null,
+          error: outcome.error,
+          ...(outcome.category !== undefined ? { errorCategory: outcome.category } : {}),
+        }));
+        log.warn(
+          { error: outcome.error, ...(outcome.category ? { category: outcome.category } : {}) },
+          'plan run failed',
+        );
+        break;
+    }
+    this.emitBoardChanged();
+  }
+
   /**
    * Live re-point to a different project: rebuild the tracker / MCP / workspace from `next`, abort
    * every running agent, reset all run state, and resume polling — no process restart. Atomic: the
@@ -356,6 +849,9 @@ export class Orchestrator {
       for (const r of this.state.retryAttempts.values()) clearTimeout(r.timer);
       this.state.retryAttempts.clear();
       for (const entry of this.state.running.values()) entry.abort.abort();
+      for (const entry of this.state.planRuns.values()) entry.run.abort.abort();
+      this.rejectAllPendingAsks('switching project');
+      this.state.planRuns.clear();
       this.state.running.clear();
       this.state.claimed.clear();
       this.state.completed.clear();
@@ -392,7 +888,7 @@ export class Orchestrator {
 
   /** Subscribe to a running session's live events; replays the buffer first. Returns unsubscribe. */
   subscribeLogs(issueId: string, cb: (ev: AgentEvent) => void): () => void {
-    const entry = this.state.running.get(issueId);
+    const entry = this.state.running.get(issueId) ?? this.state.planRuns.get(issueId)?.run;
     if (entry) for (const ev of entry.eventBuffer) cb(ev);
     let set = this.logSubscribers.get(issueId);
     if (!set) {
@@ -427,9 +923,10 @@ export class Orchestrator {
     }
   }
 
-  /** Snapshot of a session's buffered events. */
+  /** Snapshot of a session's buffered events (execution or plan run). */
   getSessionLogs(issueId: string): AgentEvent[] {
-    return this.state.running.get(issueId)?.eventBuffer.slice() ?? [];
+    const entry = this.state.running.get(issueId) ?? this.state.planRuns.get(issueId)?.run;
+    return entry?.eventBuffer.slice() ?? [];
   }
 
   /** List currently-running sessions for the dashboard. */
@@ -571,9 +1068,12 @@ export class Orchestrator {
   // ---- dispatch decisions ----
 
   private availableSlots(): number {
+    // Plan runs share the execution concurrency budget (so single_dir never overlaps a plan + an
+    // execution run in the same dir, and worktree mode respects max_concurrent_agents overall).
+    const busy = this.state.running.size + this.state.planRuns.size;
     // single_dir mode runs ONE task at a time (the agent works directly in the project dir).
-    if (this.config.workspace.mode === 'single_dir') return this.state.running.size > 0 ? 0 : 1;
-    return Math.max(this.config.agent.max_concurrent_agents - this.state.running.size, 0);
+    if (this.config.workspace.mode === 'single_dir') return busy > 0 ? 0 : 1;
+    return Math.max(this.config.agent.max_concurrent_agents - busy, 0);
   }
 
   private runningCountForState(state: string): number {

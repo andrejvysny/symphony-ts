@@ -82,6 +82,19 @@ agent:
                              # `tmux attach -t symphony-<id>`; raw stdout is logged to logs_root.
                              # No effect on the in-process claude-sdk backend.
 
+# Plan mode: the read-only "Plan" button on a Backlog ticket runs a planning agent
+# (permissionMode:'plan') that investigates the repo, asks you questions in the dashboard, and
+# produces a markdown plan to review/comment/edit before you approve it into the entry lane.
+# Requires the claude-sdk backend. All keys optional (defaults shown).
+plan:
+  qa_mode: live            # live  — the agent waits in-session; your answer continues it instantly
+                           # pause — the ticket parks as "needs input"; answering resumes its session
+  # effort: high           # reasoning depth for plan runs (default high — stronger than execution)
+  # thinking: adaptive     # adaptive | disabled
+  # model: claude-opus-4-8 # optional model override for plan runs (a ticket's own model wins)
+  # system_prompt: |       # override the built-in read-only planning contract
+  #   <role>You are ...</role>
+
 # Root for raw tmux session logs (run.jsonl/err.log per turn). Default: <tmpdir>/symphony_logs.
 # Override at launch with `--logs-root <dir>`.
 # logs_root: ~/code/symphony-logs

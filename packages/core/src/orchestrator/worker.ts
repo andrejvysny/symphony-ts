@@ -21,7 +21,7 @@ const execFileAsync = promisify(execFile);
 
 /** Mask obvious secrets (api keys/tokens) in a serialized audit line, plus a known literal secret. */
 const SECRET_RE = /(api[_-]?key|token|secret|password)(["']?\s*[:=]\s*["']?)([^"'\s,}]+)/gi;
-function redactSecrets(line: string, literal?: string): string {
+export function redactSecrets(line: string, literal?: string): string {
   let out = line.replace(SECRET_RE, (_m, key: string, sep: string) => `${key}${sep}***`);
   if (literal && literal.length >= 6) out = out.split(literal).join('***');
   return out;

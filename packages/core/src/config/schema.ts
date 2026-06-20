@@ -176,6 +176,36 @@ export const agentSchema = z
   })
   .strict();
 
+/**
+ * Plan-mode config (the read-only "Plan" run launched from a Backlog ticket). Plan runs always force
+ * `permissionMode:'plan'`, default to stronger reasoning than execution, and never move the ticket's
+ * state. See SPEC / CLAUDE.md "plan mode".
+ */
+export const planSchema = z
+  .object({
+    /**
+     * How the planning agent surfaces a clarifying question: `live` keeps the run open and continues
+     * in-session the instant the operator answers (best continuity; holds an agent slot while waiting);
+     * `pause` parks the ticket as "needs input" and resumes the agent's session on answer (frees the
+     * slot). Flip it from the dashboard Settings.
+     */
+    qa_mode: z.enum(['live', 'pause']).default('live'),
+    /** Reasoning effort for plan runs (stronger default than execution). A ticket's `effort` overrides. */
+    effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).default('high'),
+    /** Thinking mode for plan runs (SDK `thinking`). */
+    thinking: z.enum(['adaptive', 'disabled']).default('adaptive'),
+    /** Optional model override for plan runs (falls back to `agent.model`; a ticket's `model` overrides). */
+    model: z.string().optional(),
+    /** APPEND text layered on the plan system-prompt preset; overrides the built-in plan contract. */
+    system_prompt: z.string().optional(),
+    /**
+     * Backend idle watchdog for plan runs (ms). Auto-disabled while a question is pending (so the open
+     * `live`-mode query is not killed while the operator thinks). 0 disables entirely.
+     */
+    idle_timeout_ms: z.number().int().nonnegative().default(300_000),
+  })
+  .strict();
+
 export const serverSchema = z
   .object({
     port: z.number().int().nonnegative().optional(),
@@ -210,6 +240,7 @@ export const configSchema = z
     workspace: workspaceSchema.prefault({}),
     hooks: hooksSchema.prefault({}),
     agent: agentSchema.prefault({}),
+    plan: planSchema.prefault({}),
     server: serverSchema.optional(),
     worker: workerSchema.optional(),
     codex: codexSchema.optional(),
@@ -221,6 +252,7 @@ export type ParsedConfig = z.infer<typeof configSchema>;
 export type TrackerConfig = z.infer<typeof trackerSchema>;
 export type ProjectEntry = z.infer<typeof projectEntrySchema>;
 export type AgentConfig = z.infer<typeof agentSchema>;
+export type PlanConfig = z.infer<typeof planSchema>;
 export type WorkspaceConfig = z.infer<typeof workspaceSchema>;
 export type HooksConfig = z.infer<typeof hooksSchema>;
 export type ServerConfig = z.infer<typeof serverSchema>;

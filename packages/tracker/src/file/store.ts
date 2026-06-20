@@ -48,6 +48,53 @@ const usageSchema = z.object({
   updatedAt: z.string(),
 });
 
+// ---- plan-mode artifact (see @symphony/shared IssuePlan) ----
+const planQuestionOptionSchema = z.object({
+  label: z.string(),
+  description: z.string().optional(),
+});
+const planQuestionSchema = z.object({
+  id: z.string(),
+  header: z.string(),
+  question: z.string(),
+  options: z.array(planQuestionOptionSchema).optional(),
+  multiSelect: z.boolean(),
+});
+const planAskSchema = z.object({
+  id: z.string(),
+  at: z.string(),
+  questions: z.array(planQuestionSchema),
+  answers: z.record(z.string(), z.union([z.string(), z.array(z.string())])).optional(),
+  answeredAt: z.string().optional(),
+});
+const planTextAnchorSchema = z.object({
+  exact: z.string(),
+  prefix: z.string().optional(),
+  suffix: z.string().optional(),
+});
+const planCommentSchema = z.object({
+  id: z.string(),
+  at: z.string(),
+  anchor: planTextAnchorSchema,
+  body: z.string(),
+  resolved: z.boolean(),
+  author: z.enum(['operator', 'agent']),
+});
+const planSchema = z.object({
+  status: z.enum(['planning', 'awaiting_input', 'ready', 'approved', 'failed']),
+  markdown: z.string().optional(),
+  editedByUser: z.boolean().optional(),
+  sessionId: z.string().optional(),
+  pendingAsk: planAskSchema.nullable().optional(),
+  qa: z.array(planAskSchema),
+  comments: z.array(planCommentSchema),
+  revision: z.number(),
+  error: z.string().optional(),
+  errorCategory: z.string().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
 const storedIssueSchema = z.object({
   id: z.string(),
   identifier: z.string(),
@@ -67,6 +114,8 @@ const storedIssueSchema = z.object({
   effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
   /** Cumulative token/cost usage accrued by the agent on this task (absent when none). */
   usage: usageSchema.optional(),
+  /** Plan-mode artifact (generated plan + Q&A + comments); absent until a plan run starts. */
+  plan: planSchema.optional(),
 });
 export type StoredIssue = z.infer<typeof storedIssueSchema>;
 

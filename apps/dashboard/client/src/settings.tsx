@@ -56,6 +56,7 @@ export function SettingsModal(props: { onClose: () => void; onSaved: () => void 
           mode: form.workspace.mode,
           merge_on_accept: form.workspace.merge_on_accept,
         },
+        plan: { qa_mode: form.plan.qa_mode },
       });
       setSaved(true);
       props.onSaved();
@@ -236,6 +237,31 @@ export function SettingsModal(props: { onClose: () => void; onSaved: () => void 
                   </label>
                 </>
               )}
+            </div>
+
+            <div class="settings-group">
+              <div class="settings-h">Plan mode</div>
+              <label class="field">
+                <span>Question mode</span>
+                <select
+                  data-test="set-plan-qa-mode"
+                  value={form.plan.qa_mode}
+                  onChange={(e) =>
+                    setForm((f) =>
+                      f ? { ...f, plan: { qa_mode: (e.target as HTMLSelectElement).value } } : f,
+                    )
+                  }
+                >
+                  <option value="live">
+                    live — agent waits, your answer continues it instantly
+                  </option>
+                  <option value="pause">pause — ticket parks for input, resumes on answer</option>
+                </select>
+              </label>
+              <span class="muted" style="font-size:11px">
+                How the planning agent surfaces a clarifying question while it works on a Backlog
+                ticket.
+              </span>
             </div>
           </div>
         )}

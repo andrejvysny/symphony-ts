@@ -1,3 +1,4 @@
+import type { IssuePlan } from '@symphony/shared';
 import { describe, expect, it } from 'vitest';
 import { makeIssue } from '../test-support.js';
 import { PromptBuilder } from './builder.js';
@@ -25,6 +26,26 @@ describe('PromptBuilder', () => {
   it('fails on unknown variables (strict)', () => {
     const b = new PromptBuilder('{{ issue.nope.deep }}');
     expect(() => b.build(issue, null)).toThrow();
+  });
+
+  it('appends an approved plan to the rendered body, and only when approved', () => {
+    const b = new PromptBuilder('Work on {{ issue.identifier }}');
+    const mkPlan = (status: IssuePlan['status']): IssuePlan => ({
+      status,
+      qa: [],
+      comments: [],
+      revision: 1,
+      createdAt: '0',
+      updatedAt: '0',
+      markdown: '# Plan\n\nstep 1',
+    });
+    // Not appended while the plan is only ready (not yet approved).
+    expect(b.build({ ...issue, plan: mkPlan('ready') }, null)).toBe('Work on MT-1');
+    // Appended once approved.
+    const out = b.build({ ...issue, plan: mkPlan('approved') }, null);
+    expect(out).toContain('Work on MT-1');
+    expect(out).toContain('operator-approved implementation plan');
+    expect(out).toContain('# Plan\n\nstep 1');
   });
 
   it('produces a finish-up nudge with no turn-budget framing', () => {

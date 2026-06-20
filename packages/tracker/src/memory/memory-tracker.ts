@@ -1,4 +1,4 @@
-import type { IssueStateRef, NormalizedIssue } from '@symphony/shared';
+import type { IssuePlan, IssueStateRef, NormalizedIssue } from '@symphony/shared';
 import type {
   BoardReader,
   CreateIssueInput,
@@ -7,6 +7,7 @@ import type {
   IssueRemover,
   IssueWriter,
   LabelInfo,
+  PlanStore,
   Tracker,
   UploadInput,
   WorkflowStateInfo,
@@ -46,7 +47,7 @@ function synthStates(active: string[], terminal: string[]): WorkflowStateInfo[] 
  * state transitions so a test can move an issue Todo → In Progress → Done.
  */
 export class MemoryTracker
-  implements Tracker, IssueCreator, BoardReader, IssueWriter, IssueRemover
+  implements Tracker, IssueCreator, BoardReader, IssueWriter, IssueRemover, PlanStore
 {
   readonly kind = 'memory';
   private readonly issues = new Map<string, NormalizedIssue>();
@@ -135,6 +136,22 @@ export class MemoryTracker
     this.attachments.push({ issueId, url, title: title ?? url });
     const issue = this.issues.get(issueId);
     if (issue) issue.attachments = [...(issue.attachments ?? []), { url, title: title ?? url }];
+  }
+
+  // ---- PlanStore ----
+  async updatePlan(
+    issueId: string,
+    fn: (prev: IssuePlan | undefined) => IssuePlan,
+  ): Promise<IssuePlan> {
+    const issue = this.issues.get(issueId);
+    if (!issue) throw new Error(`issue ${issueId} not found`);
+    const next = fn(issue.plan);
+    issue.plan = next;
+    return next;
+  }
+
+  async getPlan(issueId: string): Promise<IssuePlan | null> {
+    return this.issues.get(issueId)?.plan ?? null;
   }
 
   // ---- IssueRemover ----

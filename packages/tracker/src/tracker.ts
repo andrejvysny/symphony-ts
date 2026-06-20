@@ -1,4 +1,10 @@
-import type { AgentEffort, IssueStateRef, IssueUsage, NormalizedIssue } from '@symphony/shared';
+import type {
+  AgentEffort,
+  IssuePlan,
+  IssueStateRef,
+  IssueUsage,
+  NormalizedIssue,
+} from '@symphony/shared';
 
 /**
  * Issue-tracker boundary (SPEC §11.5). The orchestrator only ever READS through
@@ -120,6 +126,23 @@ export interface IssueRemover {
 export function supportsIssueRemoval(t: Tracker): t is Tracker & IssueRemover {
   const r = t as Partial<IssueRemover>;
   return typeof r.deleteIssue === 'function' && typeof r.detachFromIssue === 'function';
+}
+
+/**
+ * Plan-mode persistence: read-modify-write the issue's `plan` artifact under the issue's file lock.
+ * Used by the orchestrator's plan run + the dashboard plan endpoints. Separate from {@link IssueWriter}
+ * so a tracker can omit it; the plan track is feature-gated on {@link supportsPlanStore}.
+ */
+export interface PlanStore {
+  /** Read-modify-write the plan (receives the current plan or undefined; returns the next plan). */
+  updatePlan(issueId: string, fn: (prev: IssuePlan | undefined) => IssuePlan): Promise<IssuePlan>;
+  /** The issue's current plan artifact, or null when none. */
+  getPlan(issueId: string): Promise<IssuePlan | null>;
+}
+
+export function supportsPlanStore(t: Tracker): t is Tracker & PlanStore {
+  const p = t as Partial<PlanStore>;
+  return typeof p.updatePlan === 'function' && typeof p.getPlan === 'function';
 }
 
 /** A single change in an issue's history (created, state move, field edit, …). */

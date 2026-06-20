@@ -67,3 +67,8 @@ export {
   type MemoryToolExecutor,
   type MemoryToolResult,
 } from './mcp/sdk-memory-tool.js';
+export {
+  buildPlanSdkMcpServer,
+  type PlanToolDeps,
+  type AskQuestionInput,
+} from './mcp/sdk-plan-tools.js';

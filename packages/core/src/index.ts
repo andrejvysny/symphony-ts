@@ -1,5 +1,16 @@
 export const CORE_VERSION = '0.1.2';
 
+// Re-export the plan-mode types so the dashboard (which only depends on @symphony/core) can use them.
+export type {
+  IssuePlan,
+  PlanStatus,
+  PlanQuestion,
+  PlanQuestionOption,
+  PlanAsk,
+  PlanComment,
+  PlanTextAnchor,
+} from '@symphony/shared';
+
 // config
 export {
   configSchema,

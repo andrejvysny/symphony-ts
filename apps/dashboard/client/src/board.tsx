@@ -200,6 +200,14 @@ function swatch(s: BoardStateDTO) {
   return s.color ? `background:${s.color}` : '';
 }
 
+const PLAN_BADGE: Record<string, string> = {
+  planning: 'planning…',
+  awaiting_input: 'needs input',
+  ready: 'plan ready',
+  approved: 'approved',
+  failed: 'plan failed',
+};
+
 function Card(props: {
   issue: BoardIssueDTO;
   live: Live;
@@ -215,6 +223,8 @@ function Card(props: {
   const branchPrefix = props.live.meta?.branch_prefix ?? 'symphony/';
   const maxTurns = props.live.meta?.max_turns;
   const maxCont = props.live.meta?.max_continuations ?? 0;
+  // The Plan track is offered on Backlog tickets only (read-only planning before implementation).
+  const isBacklog = !!props.live.meta && i.state === props.live.meta.backlog_state;
 
   const open = () => props.onOpen(i);
   const stop = (e: Event) => e.stopPropagation();
@@ -309,6 +319,11 @@ function Card(props: {
                 {branchPrefix}
                 {i.identifier}
               </span>
+            </div>
+          )}
+          {isBacklog && i.plan_status && (
+            <div class="card-plan">
+              <span class={`plan-badge ${i.plan_status}`}>{PLAN_BADGE[i.plan_status]}</span>
             </div>
           )}
           <CardMeta issue={i} />

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AgentEvent, ClaudeUsageLimits } from '@symphony/agent-backends';
 import { getClaudeUsageLimits } from '@symphony/agent-backends';
-import type { AgentEffort } from '@symphony/shared';
+import type { AgentEffort, IssuePlan, PlanStatus, PlanTextAnchor } from '@symphony/shared';
 import {
   listProjectKeys,
   scaffoldProject,
@@ -48,6 +48,8 @@ export interface BoardIssueDTO {
   status: IssueStatus;
   createdAt: string | null;
   updatedAt: string | null;
+  /** Plan-mode status for the card badge (planning / awaiting_input / ready / approved); null = no plan. */
+  plan_status: PlanStatus | null;
 }
 
 export interface IssueActivityDTO {
@@ -93,6 +95,8 @@ export interface IssueDetailDTO {
   /** Absolute path of the issue's git worktree when it exists on disk (for "Open in VS Code");
    *  null for issues that have never run (no worktree yet) or after terminal cleanup. */
   worktree_path: string | null;
+  /** Plan-mode artifact (generated plan + Q&A + comments); null until a plan run starts. */
+  plan: IssuePlan | null;
 }
 
 export interface BoardData {
@@ -179,6 +183,8 @@ export interface SettingsDTO {
   };
   polling: { interval_ms: number };
   workspace: { branch_prefix: string; mode: string; merge_on_accept: boolean };
+  /** Plan-mode settings (the read-only "Plan" track). */
+  plan: { qa_mode: string };
 }
 
 export interface SettingsAgentPatch {
@@ -199,6 +205,7 @@ export interface SettingsPatch {
   agent?: SettingsAgentPatch;
   polling?: { interval_ms?: number };
   workspace?: { branch_prefix?: string; mode?: string; merge_on_accept?: boolean };
+  plan?: { qa_mode?: string };
 }
 
 /** The capability surface the dashboard consumes. */
@@ -249,6 +256,27 @@ export interface DashboardSource {
   terminate(issueId: string): Promise<{ terminated: boolean }>;
   terminateAll(): Promise<{ terminated: number }>;
   unblock(issueId: string): Promise<{ unblocked: boolean }>;
+  // ---- plan mode ----
+  getPlan(issueId: string): Promise<IssuePlan | null>;
+  startPlan(
+    issueId: string,
+    customInstructions?: string,
+  ): Promise<{ started: boolean; reason?: string }>;
+  answerPlanQuestion(
+    issueId: string,
+    askId: string,
+    answers: Record<string, string | string[]>,
+  ): Promise<{ ok: boolean; reason?: string }>;
+  revisePlan(issueId: string): Promise<{ ok: boolean; reason?: string }>;
+  editPlan(issueId: string, markdown: string): Promise<{ ok: boolean; reason?: string }>;
+  addPlanComment(issueId: string, anchor: PlanTextAnchor, body: string): Promise<{ id: string }>;
+  resolvePlanComment(
+    issueId: string,
+    commentId: string,
+    resolved: boolean,
+  ): Promise<{ ok: boolean }>;
+  approvePlan(issueId: string): Promise<{ approved: boolean; reason?: string }>;
+  cancelPlan(issueId: string): Promise<{ cancelled: boolean }>;
   subscribeLogs(issueId: string, cb: (ev: AgentEvent) => void): () => void;
   /** Subscribe to global board/state changes (SSE); fires after every settled orchestrator mutation. */
   subscribeBoard(cb: () => void): () => void;
@@ -348,6 +376,17 @@ export function buildDashboardSource(
     terminate: (id) => orchestrator.terminate(id),
     terminateAll: () => orchestrator.terminateAll(),
     unblock: (id) => orchestrator.unblock(id),
+    // ---- plan mode ----
+    getPlan: (id) => orchestrator.getPlan(id),
+    startPlan: (id, customInstructions) => orchestrator.startPlan(id, customInstructions),
+    answerPlanQuestion: (id, askId, answers) => orchestrator.answerPlanQuestion(id, askId, answers),
+    revisePlan: (id) => orchestrator.revisePlan(id),
+    editPlan: (id, markdown) => orchestrator.editPlan(id, markdown),
+    addPlanComment: (id, anchor, body) => orchestrator.addPlanComment(id, anchor, body),
+    resolvePlanComment: (id, commentId, resolved) =>
+      orchestrator.resolvePlanComment(id, commentId, resolved),
+    approvePlan: (id) => orchestrator.approvePlan(id),
+    cancelPlan: (id) => orchestrator.cancelPlan(id),
     subscribeLogs: (id, cb) => orchestrator.subscribeLogs(id, cb),
     subscribeBoard: (cb) => orchestrator.subscribeBoard(cb),
 
@@ -573,6 +612,7 @@ export function buildDashboardSource(
           mode: c.workspace.mode,
           merge_on_accept: c.workspace.merge_on_accept,
         },
+        plan: { qa_mode: c.plan.qa_mode },
       };
     },
 
@@ -598,6 +638,10 @@ export function buildDashboardSource(
           if (patch.workspace.mode !== undefined) workspace['mode'] = patch.workspace.mode;
           if (patch.workspace.merge_on_accept !== undefined)
             workspace['merge_on_accept'] = patch.workspace.merge_on_accept;
+        }
+        if (patch.plan?.qa_mode !== undefined) {
+          const plan = (raw['plan'] ??= {}) as Record<string, unknown>;
+          plan['qa_mode'] = patch.plan.qa_mode;
         }
       };
       const snap = await st.persist(mutate); // persist() validates (zod) before writing
@@ -639,6 +683,7 @@ export function buildDashboardSource(
           status: statusOf(i.id, snap),
           createdAt: i.createdAt,
           updatedAt: i.updatedAt,
+          plan_status: i.plan?.status ?? null,
         };
         (columns[i.state] ??= []).push(dto);
       }
@@ -699,6 +744,7 @@ export function buildDashboardSource(
         effort: issue.effort ?? null,
         usage,
         worktree_path: worktree && existsSync(worktree) ? worktree : null,
+        plan: issue.plan ?? null,
       };
     },
 

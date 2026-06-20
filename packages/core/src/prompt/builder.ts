@@ -26,11 +26,19 @@ export class PromptBuilder {
   }
 
   build(issue: NormalizedIssue, attempt: number | null): string {
+    let body: string;
     try {
-      return this.engine.parseAndRenderSync(this.template, { issue, attempt });
+      body = this.engine.parseAndRenderSync(this.template, { issue, attempt });
     } catch (e) {
       throw new ConfigError(`prompt render failed: ${(e as Error).message}`);
     }
+    // If this ticket was planned and the operator approved the plan, append it so the implementation
+    // agent follows the agreed approach instead of re-deriving one (plan mode → execution handoff).
+    const plan = issue.plan;
+    if (plan?.status === 'approved' && plan.markdown && plan.markdown.trim().length > 0) {
+      return `${body}\n\n---\n\nAn operator-approved implementation plan for this ticket follows. Follow it; deviate only with good reason, and note why in your summary comment.\n\n${plan.markdown.trim()}`;
+    }
+    return body;
   }
 
   /**

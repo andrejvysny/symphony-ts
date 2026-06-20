@@ -13,6 +13,7 @@ import {
 import { Board, type Live } from './board.js';
 import { AgentDrawer, AgentsView } from './agents.js';
 import { CreateTicketModal, TicketModal } from './modals.js';
+import { PlanModal } from './plan.js';
 import { CreateProjectModal, ManageProjectsModal, ProjectSwitcher } from './projects.js';
 import { SettingsModal } from './settings.js';
 import { UsageGauge } from './usage-gauge.js';
@@ -29,6 +30,7 @@ export function App() {
   const [showCreate, setShowCreate] = useState(false);
   const [createStateId, setCreateStateId] = useState<string | null>(null);
   const [selected, setSelected] = useState<BoardIssueDTO | null>(null);
+  const [planIssue, setPlanIssue] = useState<BoardIssueDTO | null>(null);
   const [agentIssueId, setAgentIssueId] = useState<string | null>(null);
   const [caps, setCaps] = useState<Capabilities | null>(null);
   const [usage, setUsage] = useState<ClaudeUsageLimits | null>(null);
@@ -378,6 +380,19 @@ export function App() {
             setTab('agents');
             setAgentIssueId(id);
           }}
+          onOpenPlan={(issue) => {
+            setSelected(null);
+            setPlanIssue(issue);
+          }}
+        />
+      )}
+
+      {planIssue && (
+        <PlanModal
+          issue={planIssue}
+          meta={meta}
+          onClose={() => setPlanIssue(null)}
+          onChanged={() => void refresh()}
         />
       )}
 

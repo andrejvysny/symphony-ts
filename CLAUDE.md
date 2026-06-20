@@ -46,6 +46,16 @@ behind one `CodingAgentBackend` interface — Claude Agent SDK and a CLI stream-
   client). `file/store.ts` does atomic temp+rename writes and a **process-wide per-file async mutex**
   (keyed by absolute path) so the orchestrator's tracker and the SDK MCP executors' tracker serialize.
   `meta.json` is the single source of truth for issue ids (`<IDENTIFIER>-<seq>`).
+- **Plan mode** (read-only "Plan" track on Backlog tickets, claude-sdk only): a parallel,
+  manually-triggered run that produces a reviewable markdown plan and never moves the ticket's state.
+  `agent-backends/src/mcp/sdk-plan-tools.ts` = the in-process `symphony_ask`/`symphony_submit_plan`
+  tools; `orchestrator/plan-worker.ts` = the single `permissionMode:'plan'` run (no turn loop, no
+  integrate, cleanup-only); the orchestrator owns the `planRuns`/`pendingAsks` maps + `startPlan`/
+  `answerPlanQuestion`/`revisePlan`/`editPlan`/`add|resolvePlanComment`/`approvePlan`/`cancelPlan`
+  (the tool executors are closures over the run; `plan.qa_mode` live=block-in-session vs pause=park+
+  resume). The plan persists on the issue's optional `plan` field (`PlanStore` tracker capability,
+  text-quote-anchored comments). Approve moves Backlog→entry-lane and `builder.build()` injects the
+  approved plan into the implementation prompt. UI: `apps/dashboard/client/src/plan.tsx`.
 - `packages/core/src/workspace` — git worktrees off one shared clone, hooks, path-safety invariants.
 - `packages/core/src/config` + `workflow` — zod schema, `$VAR`/`~` resolution, WorkflowStore hot-reload
   (1s stat-poll, last-known-good on bad reload).

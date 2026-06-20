@@ -1,5 +1,6 @@
-import type { AgentEvent } from '@symphony/agent-backends';
+import type { AgentEvent, PlanToolDeps } from '@symphony/agent-backends';
 import type { NormalizedIssue } from '@symphony/shared';
+import type { PlanRunControl } from './plan-worker.js';
 import { emptyTokenState, type TokenState } from './token-accounting.js';
 
 /** Cap on the per-session rolling event log retained in memory for live streaming. */
@@ -29,6 +30,27 @@ export interface BlockedEntry {
   identifier: string;
   reason: string;
   blockedAt: number;
+}
+
+/**
+ * A live plan run (the read-only "Plan" track, parallel to execution). Wraps a {@link RunningEntry}
+ * (so it reuses the same event buffer / token accounting / live-log streaming) plus the shared
+ * control flags the MCP tool executors flip, and the run's resolved Q&A mode.
+ */
+export interface PlanRunEntry {
+  run: RunningEntry;
+  control: PlanRunControl;
+  mode: 'live' | 'pause';
+  /** The run's plan-tool executors (also handed to the SDK MCP server). Exposed for tests. */
+  deps?: PlanToolDeps;
+}
+
+/** A live-mode plan question awaiting an operator answer — resolves the agent's blocked `symphony_ask`. */
+export interface PendingAsk {
+  issueId: string;
+  /** Resolve with the formatted answer text the agent's tool call returns. */
+  resolve: (answersText: string) => void;
+  reject: (err: Error) => void;
 }
 
 export interface RetryEntry {
@@ -64,6 +86,10 @@ export interface OrchestratorState {
    * / nonactive / fresh poll dispatch).
    */
   resumeSessions: Map<string, string>;
+  /** Live plan runs (the read-only "Plan" track), keyed by issue id. Shares the concurrency budget. */
+  planRuns: Map<string, PlanRunEntry>;
+  /** Live-mode `symphony_ask` calls awaiting an operator answer, keyed by ask id. */
+  pendingAsks: Map<string, PendingAsk>;
   totals: Totals;
   rateLimits: unknown | null;
   pollCheckInProgress: boolean;
@@ -79,6 +105,8 @@ export function createState(): OrchestratorState {
     blocked: new Map(),
     retryAttempts: new Map(),
     resumeSessions: new Map(),
+    planRuns: new Map(),
+    pendingAsks: new Map(),
     totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0, secondsRunning: 0 },
     rateLimits: null,
     pollCheckInProgress: false,

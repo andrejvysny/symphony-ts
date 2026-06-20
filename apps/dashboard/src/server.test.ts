@@ -128,6 +128,7 @@ function fakeSource(): DashboardSource {
       },
       polling: { interval_ms: 5000 },
       workspace: { branch_prefix: 'symphony/', mode: 'single_dir', merge_on_accept: true },
+      plan: { qa_mode: 'live' },
     }),
     updateSettings: vi.fn().mockResolvedValue(undefined),
     getUsageLimits: vi.fn().mockResolvedValue({
@@ -194,6 +195,15 @@ function fakeSource(): DashboardSource {
     terminate: vi.fn().mockResolvedValue({ terminated: true }),
     terminateAll: vi.fn().mockResolvedValue({ terminated: 2 }),
     unblock: vi.fn().mockResolvedValue({ unblocked: true }),
+    getPlan: vi.fn().mockResolvedValue(null),
+    startPlan: vi.fn().mockResolvedValue({ started: true }),
+    answerPlanQuestion: vi.fn().mockResolvedValue({ ok: true }),
+    revisePlan: vi.fn().mockResolvedValue({ ok: true }),
+    editPlan: vi.fn().mockResolvedValue({ ok: true }),
+    addPlanComment: vi.fn().mockResolvedValue({ id: 'c1' }),
+    resolvePlanComment: vi.fn().mockResolvedValue({ ok: true }),
+    approvePlan: vi.fn().mockResolvedValue({ approved: true }),
+    cancelPlan: vi.fn().mockResolvedValue({ cancelled: true }),
     subscribeLogs: vi.fn().mockReturnValue(() => {}),
     subscribeBoard: vi.fn().mockReturnValue(() => {}),
   };
@@ -333,6 +343,71 @@ describe('dashboard server', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().unblocked).toBe(true);
     expect(source.unblock).toHaveBeenCalledWith('mem-1');
+    await app.close();
+  });
+
+  it('starts a plan run and routes answers / approve / comments', async () => {
+    const source = fakeSource();
+    const app = createDashboardServer(source);
+
+    const start = await app.inject({ method: 'POST', url: '/api/v1/issues/i1/plan' });
+    expect(start.statusCode).toBe(200);
+    expect(source.startPlan).toHaveBeenCalledWith('i1', undefined);
+
+    // Custom instructions from the plan-start panel are forwarded (trimmed) to the source.
+    const startWithInstr = await app.inject({
+      method: 'POST',
+      url: '/api/v1/issues/i1/plan',
+      payload: { instructions: '  focus on the parser  ' },
+    });
+    expect(startWithInstr.statusCode).toBe(200);
+    expect(source.startPlan).toHaveBeenCalledWith('i1', 'focus on the parser');
+
+    const answer = await app.inject({
+      method: 'POST',
+      url: '/api/v1/issues/i1/plan/answer',
+      payload: { askId: 'a1', answers: { q1: 'A' } },
+    });
+    expect(answer.statusCode).toBe(200);
+    expect(source.answerPlanQuestion).toHaveBeenCalledWith('i1', 'a1', { q1: 'A' });
+
+    const edit = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/issues/i1/plan/markdown',
+      payload: { markdown: '# Plan' },
+    });
+    expect(edit.statusCode).toBe(200);
+
+    const comment = await app.inject({
+      method: 'POST',
+      url: '/api/v1/issues/i1/plan/comments',
+      payload: { anchor: { exact: 'do it' }, body: 'scope down' },
+    });
+    expect(comment.statusCode).toBe(201);
+    expect(comment.json().id).toBe('c1');
+
+    const approve = await app.inject({ method: 'POST', url: '/api/v1/issues/i1/plan/approve' });
+    expect(approve.statusCode).toBe(200);
+    expect(approve.json().approved).toBe(true);
+    await app.close();
+  });
+
+  it('returns 409 when a plan action is rejected, and 400 on bad input', async () => {
+    const source = fakeSource();
+    (source.startPlan as ReturnType<typeof vi.fn>).mockResolvedValue({
+      started: false,
+      reason: 'no available agent slot',
+    });
+    const app = createDashboardServer(source);
+    const busy = await app.inject({ method: 'POST', url: '/api/v1/issues/i1/plan' });
+    expect(busy.statusCode).toBe(409);
+    expect(busy.json().reason).toMatch(/slot/);
+    const bad = await app.inject({
+      method: 'POST',
+      url: '/api/v1/issues/i1/plan/answer',
+      payload: { answers: {} },
+    });
+    expect(bad.statusCode).toBe(400);
     await app.close();
   });
 
