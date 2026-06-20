@@ -12,6 +12,7 @@ export type PlanStatus = 'planning' | 'awaiting_input' | 'ready' | 'approved' | 
 export interface PlanQuestionOption {
   label: string;
   description?: string;
+  recommended?: boolean;
 }
 export interface PlanQuestion {
   id: string;

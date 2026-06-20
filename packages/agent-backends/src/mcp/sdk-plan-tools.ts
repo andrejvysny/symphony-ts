@@ -8,7 +8,7 @@ import { z } from 'zod';
 export interface AskQuestionInput {
   header: string;
   question: string;
-  options?: { label: string; description?: string }[];
+  options?: { label: string; description?: string; recommended?: boolean }[];
   multiSelect?: boolean;
 }
 
@@ -30,7 +30,8 @@ const ASK_DESCRIPTION =
   'Use this — never AskUserQuestion — whenever a decision genuinely needs the human (ambiguous scope, ' +
   'a trade-off only they can pick, missing context you cannot infer from the repo). Batch related ' +
   'questions into one call. For each question give a short header, the question text, and optionally ' +
-  '2–4 labelled options (omit options for a free-text answer). Do not ask about things you can ' +
+  '2–4 labelled options (omit options for a free-text answer). If one option is the clear default, ' +
+  'set recommended: true on it (at most one per question). Do not ask about things you can ' +
   'reasonably determine yourself by reading the code.';
 
 const SUBMIT_PLAN_DESCRIPTION =
@@ -66,6 +67,12 @@ export function buildPlanSdkMcpServer(deps: PlanToolDeps): Record<string, unknow
                         .string()
                         .optional()
                         .describe('What this choice means / its trade-off.'),
+                      recommended: z
+                        .boolean()
+                        .optional()
+                        .describe(
+                          'Mark this as the recommended choice (at most one per question).',
+                        ),
                     }),
                   )
                   .optional()

@@ -32,6 +32,8 @@ export type PlanStatus = 'planning' | 'awaiting_input' | 'ready' | 'approved' | 
 export interface PlanQuestionOption {
   label: string;
   description?: string;
+  /** Marks the default/suggested choice; rendered as a "Recommended" badge (at most one per question). */
+  recommended?: boolean;
 }
 
 /** A single question the planning agent asks the operator. */

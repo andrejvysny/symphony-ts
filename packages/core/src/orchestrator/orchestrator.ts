@@ -725,6 +725,7 @@ export class Orchestrator {
             options: q.options.map((o) => ({
               label: o.label,
               ...(o.description !== undefined ? { description: o.description } : {}),
+              ...(o.recommended !== undefined ? { recommended: o.recommended } : {}),
             })),
           }
         : {}),

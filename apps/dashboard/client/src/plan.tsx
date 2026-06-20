@@ -319,6 +319,16 @@ export function PlanModal(props: {
         ? 'review'
         : null;
   const lines = useLiveLog(issue.id, planning || awaiting);
+  // The stepper can preview any phase without affecting the live run; null = follow the live phase.
+  const [previewPhase, setPreviewPhase] = useState<Phase | null>(null);
+  const viewPhase = previewPhase ?? phase;
+  const prevPhaseRef = useRef(phase);
+  useEffect(() => {
+    if (prevPhaseRef.current !== phase) {
+      prevPhaseRef.current = phase;
+      setPreviewPhase(null); // follow live progress when the real phase advances
+    }
+  }, [phase]);
   const comments = plan?.comments ?? [];
   const unresolvedComments = useMemo(() => comments.filter((c) => !c.resolved), [comments]);
 
@@ -363,6 +373,13 @@ export function PlanModal(props: {
     return Array.isArray(v) ? v.length > 0 : typeof v === 'string' && v.trim().length > 0;
   }).length;
 
+  const submitAnswers = () => {
+    if (busy || !answerable || phase !== 'questions' || !plan?.pendingAsk) return;
+    void act(() => api.answerPlanQuestion(issue.id, plan.pendingAsk!.id, answers)).then(() =>
+      setAnswers({}),
+    );
+  };
+
   const renderAnchors: RenderAnchor[] = comments.map((c, idx) => ({
     id: c.id,
     exact: c.anchor.exact,
@@ -373,7 +390,17 @@ export function PlanModal(props: {
 
   return (
     <div class="overlay" onClick={props.onClose}>
-      <div class="modal plan-modal" data-test="plan-modal" onClick={(e) => e.stopPropagation()}>
+      <div
+        class="modal plan-modal"
+        data-test="plan-modal"
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+            e.preventDefault();
+            submitAnswers();
+          }
+        }}
+      >
         {/* ── header ── */}
         <div class="plan-head">
           <div class="plan-head-row">
@@ -404,18 +431,27 @@ export function PlanModal(props: {
           {phase && (
             <div class="plan-stepper">
               {STEPS.map((s, idx) => {
-                const cur = STEPS.findIndex((x) => x.key === phase);
-                const st = idx < cur ? 'done' : idx === cur ? 'cur' : 'todo';
+                const liveIdx = STEPS.findIndex((x) => x.key === phase);
+                // The viewed step is highlighted; completed (live) steps stay marked done.
+                const st = s.key === viewPhase ? 'cur' : idx < liveIdx ? 'done' : 'todo';
                 return (
                   <div class="plan-step-wrap" key={s.key}>
-                    <div class={`plan-step ${st}`}>
+                    <button
+                      type="button"
+                      class={`plan-step ${st}`}
+                      data-test={`plan-step-${s.key}`}
+                      onClick={() => setPreviewPhase(s.key === phase ? null : s.key)}
+                    >
                       <span class="num">{s.num}</span>
                       <span class="lbl">{s.label}</span>
-                    </div>
-                    {idx < STEPS.length - 1 && <span class={`plan-step-line ${st}`} />}
+                    </button>
+                    {idx < STEPS.length - 1 && (
+                      <span class={`plan-step-line ${idx < liveIdx ? 'done' : ''}`} />
+                    )}
                   </div>
                 );
               })}
+              <span class="plan-step-hint">click to preview each state</span>
             </div>
           )}
         </div>
@@ -436,7 +472,7 @@ export function PlanModal(props: {
 
         {/* ── body ── */}
         <div
-          class={`plan-body${phase === 'review' && !editing ? ' review' : ''}${showStart ? ' start' : ''}`}
+          class={`plan-body${viewPhase === 'review' && hasPlan && !editing ? ' review' : ''}${showStart ? ' start' : ''}`}
         >
           {/* no plan yet (or a failed run) → offer to start, with optional steering instructions */}
           {showStart && (
@@ -457,38 +493,52 @@ export function PlanModal(props: {
           )}
 
           {/* questions */}
-          {phase === 'questions' && (
+          {viewPhase === 'questions' && (
             <div class="plan-questions pm-scroll">
-              {plan?.pendingAsk?.questions.map((q) => (
-                <QuestionCard
-                  key={q.id}
-                  q={q}
-                  value={answers[q.id]}
-                  onChange={(v) => setAnswers((a) => ({ ...a, [q.id]: v }))}
-                />
-              ))}
+              {(plan?.pendingAsk?.questions?.length ?? 0) > 0 ? (
+                plan!.pendingAsk!.questions.map((q) => (
+                  <QuestionCard
+                    key={q.id}
+                    q={q}
+                    value={answers[q.id]}
+                    onChange={(v) => setAnswers((a) => ({ ...a, [q.id]: v }))}
+                  />
+                ))
+              ) : (
+                <div class="plan-empty">No open questions to answer.</div>
+              )}
             </div>
           )}
 
-          {/* drafting (live) */}
-          {phase === 'drafting' && (
+          {/* drafting (live or previewed) */}
+          {viewPhase === 'drafting' && (
             <div class="plan-drafting">
               <div class="plan-drafting-head">
-                <span class="ping">
-                  <span class="ring" />
-                  <span class="dot" />
-                </span>
-                <span class="t">Drafting plan{hasPlan ? ' (revision)' : ''}…</span>
+                {phase === 'drafting' ? (
+                  <>
+                    <span class="ping">
+                      <span class="ring" />
+                      <span class="dot" />
+                    </span>
+                    <span class="t">Drafting plan{hasPlan ? ' (revision)' : ''}…</span>
+                  </>
+                ) : (
+                  <span class="t">Drafting log</span>
+                )}
               </div>
               <div class="plan-log-body pm-scroll" data-test="plan-log">
-                {lines.length > 0 ? lines.join('') : 'Waiting for the agent…'}
-                <span class="plan-caret">▍</span>
+                {lines.length > 0
+                  ? lines.join('')
+                  : phase === 'drafting'
+                    ? 'Waiting for the agent…'
+                    : 'No drafting log to show.'}
+                {phase === 'drafting' && <span class="plan-caret">▍</span>}
               </div>
             </div>
           )}
 
           {/* review: edit OR doc+comments */}
-          {phase === 'review' &&
+          {viewPhase === 'review' &&
             (editing ? (
               <div class="plan-edit">
                 <textarea
@@ -511,7 +561,7 @@ export function PlanModal(props: {
                   </button>
                 </div>
               </div>
-            ) : (
+            ) : hasPlan ? (
               <div class="plan-review">
                 <div
                   class="plan-doc pm-scroll"
@@ -551,12 +601,19 @@ export function PlanModal(props: {
                   busy={busy}
                 />
               </div>
+            ) : (
+              <div class="plan-empty">The plan will appear here once drafting completes.</div>
             ))}
         </div>
 
         {/* ── footer ── */}
         <div class="modal-foot">
           <div class="row" style="gap:8px">
+            {previewPhase && previewPhase !== phase && (
+              <button class="btn ghost sm" onClick={() => setPreviewPhase(null)}>
+                ← Back to current
+              </button>
+            )}
             {(planning || awaiting) && (
               <button
                 class="btn ghost sm"
@@ -587,13 +644,10 @@ export function PlanModal(props: {
                 class="btn primary sm"
                 data-test="plan-answer"
                 disabled={busy || !answerable}
-                onClick={() =>
-                  void act(() =>
-                    api.answerPlanQuestion(issue.id, plan!.pendingAsk!.id, answers),
-                  ).then(() => setAnswers({}))
-                }
+                onClick={submitAnswers}
               >
                 Submit answers
+                <kbd class="plan-kbd">⏎</kbd>
               </button>
             </div>
           )}
@@ -871,6 +925,23 @@ function CommentsRail(props: {
 
 // ---- questions ----
 
+// A "(Recommended)" marker the agent may append to a label/description (Claude's AskUserQuestion
+// convention) — we strip it for display and surface it as the explicit badge instead.
+const RECO_MARKER = /\s*\((?:recommended)\)\s*$/i;
+function normOpt(o: PlanQuestionOption): {
+  label: string;
+  description?: string;
+  recommended: boolean;
+} {
+  const fromMarker =
+    RECO_MARKER.test(o.label) || (!!o.description && RECO_MARKER.test(o.description));
+  return {
+    label: o.label.replace(RECO_MARKER, ''),
+    ...(o.description !== undefined ? { description: o.description.replace(RECO_MARKER, '') } : {}),
+    recommended: o.recommended === true || fromMarker,
+  };
+}
+
 function QuestionCard(props: {
   q: PlanQuestion;
   value: string | string[] | undefined;
@@ -896,12 +967,15 @@ function QuestionCard(props: {
       <div class="plan-q-head">
         <span class="lbl">{q.header}</span>
         <span class="rule" />
-        <span class="hint">{q.multiSelect ? 'select all that apply' : 'choose one'}</span>
+        {(q.options?.length ?? 0) > 0 && (
+          <span class="hint">{q.multiSelect ? 'select all that apply' : 'choose one'}</span>
+        )}
       </div>
       <div class="plan-q-text">{q.question}</div>
       <div class="plan-opts">
         {(q.options ?? []).map((o) => {
           const on = selected(o.label);
+          const n = normOpt(o);
           return (
             <div
               key={o.label}
@@ -913,20 +987,31 @@ function QuestionCard(props: {
                 {on && (q.multiSelect ? '✓' : <span class="rad" />)}
               </span>
               <div class="plan-opt-main">
-                <span class="lbl">{o.label}</span>
-                {o.description && <span class="desc">{o.description}</span>}
+                <div class="plan-opt-lblrow">
+                  <span class="lbl">{n.label}</span>
+                  {n.recommended && <span class="plan-opt-badge">Recommended</span>}
+                </div>
+                {n.description && <span class="desc">{n.description}</span>}
               </div>
             </div>
           );
         })}
-        {!q.multiSelect && (
-          <input
-            class="plan-opt-other"
-            placeholder="Other / custom answer…"
-            value={freeText && typeof props.value === 'string' ? props.value : ''}
-            onInput={(e) => props.onChange((e.target as HTMLInputElement).value)}
-          />
-        )}
+        {!q.multiSelect &&
+          ((q.options?.length ?? 0) === 0 ? (
+            <textarea
+              class="plan-opt-other tall"
+              placeholder="Add constraints or context for the agent…"
+              value={freeText && typeof props.value === 'string' ? props.value : ''}
+              onInput={(e) => props.onChange((e.target as HTMLTextAreaElement).value)}
+            />
+          ) : (
+            <input
+              class="plan-opt-other"
+              placeholder="Other / custom answer…"
+              value={freeText && typeof props.value === 'string' ? props.value : ''}
+              onInput={(e) => props.onChange((e.target as HTMLInputElement).value)}
+            />
+          ))}
       </div>
     </div>
   );
