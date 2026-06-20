@@ -1,5 +1,3 @@
-export const CORE_VERSION = '0.1.2';
-
 // Re-export the plan-mode types so the dashboard (which only depends on @symphony/core) can use them.
 export type {
   IssuePlan,

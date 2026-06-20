@@ -1,13 +1,13 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   buildBackend,
   buildDashboardSource,
   buildMcpConfig,
   buildTracker,
   buildWorkspaceManager,
-  CORE_VERSION,
   hasActiveProject,
   createLogger,
   type Logger,
@@ -22,6 +22,22 @@ import {
 } from '@symphony/core';
 import { startDashboard } from '@symphony/dashboard';
 import { FileTracker, makeFileSemanticTools, supportsIssueCreation } from '@symphony/tracker';
+
+// Single source of truth for the printed version: the published package.json shipped next to this
+// bundle (dist/main.js → ../package.json). Reading it at runtime avoids a hand-maintained constant
+// that silently drifts every release.
+function resolveVersion(): string {
+  try {
+    const pkgPath = fileURLToPath(new URL('../package.json', import.meta.url));
+    const { version } = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: string };
+    if (typeof version === 'string' && version.length > 0) return version;
+  } catch {
+    // fall through to sentinel below
+  }
+  return '0.0.0-unknown';
+}
+
+const VERSION = resolveVersion();
 
 interface Args {
   positionals: string[];
@@ -223,7 +239,7 @@ async function runOrchestrator(args: Args): Promise<void> {
   await new Promise(() => {}); // run forever
 }
 
-const HELP = `symphony ${CORE_VERSION} — agent-agnostic coding-agent orchestrator
+const HELP = `symphony ${VERSION} — agent-agnostic coding-agent orchestrator
 
 Usage:
   symphony init [path] [--force]                      Write a starter WORKFLOW.md
@@ -251,7 +267,7 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
   if (args.flags.has('version') || args.flags.has('v') || args.positionals[0] === 'version') {
-    process.stdout.write(`symphony ${CORE_VERSION}\n`);
+    process.stdout.write(`symphony ${VERSION}\n`);
     return;
   }
   if (args.positionals[0] === 'init') {
