@@ -32,6 +32,9 @@ type Effort = (typeof EFFORTS)[number];
 const isEffort = (v: unknown): v is Effort =>
   typeof v === 'string' && (EFFORTS as readonly string[]).includes(v);
 
+// Allowed ticket types (kept in sync with the client's ISSUE_TYPES). '' clears the type.
+const ISSUE_TYPES: readonly string[] = ['bug', 'feature', 'task', 'enhancement', 'chore', 'docs'];
+
 const UPLOAD_CONTENT_TYPES: Record<string, string> = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -316,6 +319,11 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
       if (typeof b.title === 'string') edit.title = b.title;
       if (typeof b.description === 'string') edit.description = b.description;
       if (b.priority === null || typeof b.priority === 'number') edit.priority = b.priority;
+      if (typeof b.type === 'string') {
+        if (b.type !== '' && !ISSUE_TYPES.includes(b.type))
+          return reply.code(400).send({ error: { code: 'invalid_type' } });
+        edit.type = b.type;
+      }
       if (Array.isArray(b.labels)) edit.labels = b.labels.filter((l) => typeof l === 'string');
       if (b.model === null || typeof b.model === 'string') edit.model = b.model;
       if (b.effort !== undefined) {
@@ -545,6 +553,137 @@ export function createDashboardServer(source: DashboardSource): FastifyInstance 
         .code(502)
         .send({ error: { code: 'plan_cancel_failed', message: (e as Error).message } });
     }
+  });
+
+  // ---- sequence (order) mode: LLM-ordered SUBSET of Backlog tickets ----
+
+  app.post<{ Body: { ticketIds?: unknown; instructions?: unknown } }>(
+    '/api/v1/orders',
+    async (req, reply) => {
+      const b = (req.body ?? {}) as { ticketIds?: unknown; instructions?: unknown };
+      const ids = Array.isArray(b.ticketIds)
+        ? b.ticketIds.filter((x): x is string => typeof x === 'string')
+        : [];
+      if (ids.length < 2) return reply.code(400).send({ error: { code: 'need_two_tickets' } });
+      const instructions = typeof b.instructions === 'string' ? b.instructions : undefined;
+      try {
+        const r = await source.startOrder(ids, instructions);
+        return reply.code(r.started ? 200 : 409).send(r);
+      } catch (e) {
+        return reply
+          .code(502)
+          .send({ error: { code: 'order_start_failed', message: (e as Error).message } });
+      }
+    },
+  );
+
+  app.get('/api/v1/orders', async (_req, reply) => {
+    try {
+      return reply.send({ orders: await source.listOrders() });
+    } catch (e) {
+      return reply
+        .code(502)
+        .send({ error: { code: 'orders_unavailable', message: (e as Error).message } });
+    }
+  });
+
+  app.get<{ Params: { runId: string } }>('/api/v1/orders/:runId', async (req, reply) => {
+    try {
+      return reply.send({ order: await source.getOrder(req.params.runId) });
+    } catch (e) {
+      return reply
+        .code(502)
+        .send({ error: { code: 'order_unavailable', message: (e as Error).message } });
+    }
+  });
+
+  app.post<{
+    Params: { runId: string };
+    Body: { askId?: string; answers?: Record<string, string | string[]> };
+  }>('/api/v1/orders/:runId/answer', async (req, reply) => {
+    const { askId, answers } = req.body ?? {};
+    if (!askId || typeof answers !== 'object' || answers === null)
+      return reply.code(400).send({ error: { code: 'missing_answer' } });
+    try {
+      const r = await source.answerOrderQuestion(req.params.runId, askId, answers);
+      return reply.code(r.ok ? 200 : 409).send(r);
+    } catch (e) {
+      return reply
+        .code(502)
+        .send({ error: { code: 'order_answer_failed', message: (e as Error).message } });
+    }
+  });
+
+  app.post<{ Params: { runId: string }; Body: { instructions?: unknown } }>(
+    '/api/v1/orders/:runId/rerun',
+    async (req, reply) => {
+      const instructions =
+        typeof (req.body ?? {}).instructions === 'string'
+          ? (req.body as { instructions: string }).instructions
+          : undefined;
+      try {
+        const r = await source.reRunOrder(req.params.runId, instructions);
+        return reply.code(r.ok ? 200 : 409).send(r);
+      } catch (e) {
+        return reply
+          .code(502)
+          .send({ error: { code: 'order_rerun_failed', message: (e as Error).message } });
+      }
+    },
+  );
+
+  app.post<{ Params: { runId: string }; Body: { order?: unknown; release?: unknown } }>(
+    '/api/v1/orders/:runId/approve',
+    async (req, reply) => {
+      const body = req.body ?? {};
+      const raw = body.order;
+      const order = Array.isArray(raw)
+        ? raw.filter((x): x is string => typeof x === 'string')
+        : undefined;
+      // `release` defaults to true (queue to the entry lane); false records the order in Backlog.
+      const release = body.release === false ? false : true;
+      try {
+        const r = await source.approveOrder(req.params.runId, order, release);
+        return reply.code(r.approved ? 200 : 409).send(r);
+      } catch (e) {
+        return reply
+          .code(502)
+          .send({ error: { code: 'order_approve_failed', message: (e as Error).message } });
+      }
+    },
+  );
+
+  app.post<{ Params: { runId: string } }>('/api/v1/orders/:runId/cancel', async (req, reply) => {
+    try {
+      return reply.send(await source.cancelOrder(req.params.runId));
+    } catch (e) {
+      return reply
+        .code(502)
+        .send({ error: { code: 'order_cancel_failed', message: (e as Error).message } });
+    }
+  });
+
+  // Order-run live log (SSE) — keyed by runId (subscribeLogs resolves order runs by their run id).
+  app.get<{ Params: { runId: string } }>('/api/v1/orders/:runId/logs', (req, reply) => {
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+    });
+    reply.raw.write('event: open\ndata: {}\n\n');
+    const unsubscribe = source.subscribeLogs(req.params.runId, (ev) => {
+      reply.raw.write(`data: ${JSON.stringify(ev)}\n\n`);
+    });
+    const ping = setInterval(() => reply.raw.write(': ping\n\n'), 20_000);
+    let cleaned = false;
+    const cleanup = (): void => {
+      if (cleaned) return;
+      cleaned = true;
+      clearInterval(ping);
+      unsubscribe();
+    };
+    req.raw.on('close', cleanup);
   });
 
   app.post<{ Params: { issueId: string } }>('/api/v1/sessions/:issueId/terminate', async (req) =>

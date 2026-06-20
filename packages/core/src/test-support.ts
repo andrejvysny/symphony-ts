@@ -23,6 +23,7 @@ export function makeIssue(partial: Partial<NormalizedIssue> & { id: string }): N
     blockedBy: partial.blockedBy ?? [],
     createdAt: partial.createdAt ?? null,
     updatedAt: partial.updatedAt ?? null,
+    ...(partial.rank !== undefined ? { rank: partial.rank } : {}),
   };
 }
 

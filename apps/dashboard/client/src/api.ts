@@ -58,12 +58,65 @@ export interface PlanDTO {
   updatedAt: string;
 }
 
+/** Lifecycle of a Sequence ordering run (mirrors @symphony/shared OrderStatus). */
+export type OrderStatus = 'ordering' | 'awaiting_input' | 'ready' | 'approved' | 'failed';
+
+/** A selected ticket snapshotted into an order run. */
+export interface OrderTicketRefDTO {
+  id: string;
+  identifier: string;
+  title: string;
+}
+
+/** One ticket's place in the proposed sequence. */
+export interface OrderProposalTicketDTO {
+  id: string;
+  blockedBy: string[];
+  rationale: string;
+}
+
+/** The agent's (or operator-edited) proposed ordering for the selected subset. */
+export interface OrderProposalDTO {
+  order: string[];
+  tickets: OrderProposalTicketDTO[];
+  summary: string;
+  editedByUser?: boolean;
+}
+
+/** A Sequence ordering run artifact (mirrors @symphony/shared OrderRun). */
+export interface OrderDTO {
+  runId: string;
+  status: OrderStatus;
+  selected: OrderTicketRefDTO[];
+  customInstructions?: string;
+  proposal?: OrderProposalDTO;
+  sessionId?: string;
+  pendingAsk?: PlanAsk | null;
+  qa: PlanAsk[];
+  revision: number;
+  /** On approve: true → queued to the entry lane; false → committed but kept in Backlog. */
+  released?: boolean;
+  error?: string;
+  errorCategory?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Ticket types offered in the UI (the breadcrumb badge); kept in sync with the server validator. */
+export const ISSUE_TYPES = ['bug', 'feature', 'task', 'enhancement', 'chore', 'docs'] as const;
+export type IssueType = (typeof ISSUE_TYPES)[number];
+
 export interface BoardIssueDTO {
   id: string;
   identifier: string;
   title: string;
   state: string;
   priority: number | null;
+  type: string | null;
+  /** Sequence dispatch order (lower = earlier); null = unranked. */
+  rank: number | null;
+  /** Identifiers of the tickets this one is blocked by (sequencing deps); empty when none. */
+  blocked_by: string[];
   labels: string[];
   url: string | null;
   status: IssueStatus;
@@ -94,6 +147,11 @@ export interface IssueDetailDTO {
   description: string | null;
   state: string;
   priority: number | null;
+  type: string | null;
+  /** Sequence dispatch order (lower = earlier); null = unranked. */
+  rank: number | null;
+  /** Identifiers of the tickets this one is blocked by (sequencing deps); empty when none. */
+  blocked_by: string[];
   labels: string[];
   url: string | null;
   createdAt: string | null;
@@ -101,8 +159,8 @@ export interface IssueDetailDTO {
   status: IssueStatus;
   activity: IssueActivityDTO[];
   comments: IssueCommentDTO[];
-  /** Attachment records persisted on the issue (asset url + title). */
-  attachments: Array<{ url: string; title: string }>;
+  /** Attachment records persisted on the issue (asset url + title + optional size/contentType). */
+  attachments: Array<{ url: string; title: string; size?: number; contentType?: string }>;
   /** Per-task agent overrides (null = inherit the global agent config). */
   model: string | null;
   effort: AgentEffort | null;
@@ -177,6 +235,8 @@ export interface IssueEdit {
   title?: string;
   description?: string;
   priority?: number | null;
+  /** Ticket type (bug/feature/…); empty string clears it. */
+  type?: string;
   labels?: string[];
   /** Per-task agent overrides; null clears back to the global agent config. */
   model?: string | null;
@@ -236,6 +296,8 @@ export interface Capabilities {
   settings: boolean;
   /** Top-bar Claude usage-limit gauge is available (Claude backend + opt-in flag). */
   usage_limits: boolean;
+  /** Sequence (ordering) feature is available (claude-sdk + order store + enabled) → show the tab. */
+  order: boolean;
   /** A project is active; false → the dashboard shows the create/open prompt instead of the board. */
   activeProject: boolean;
 }
@@ -478,6 +540,53 @@ export const api = {
     fetch(`/api/v1/issues/${encodeURIComponent(id)}/plan/cancel`, { method: 'POST' }).then((r) =>
       jsonOrThrow<{ cancelled: boolean }>(r),
     ),
+  // ---- sequence (order) mode ----
+  startOrder: (ticketIds: string[], instructions?: string) =>
+    fetch('/api/v1/orders', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ticketIds, ...(instructions ? { instructions } : {}) }),
+    }).then((r) => planResult<{ started: boolean; runId?: string; reason?: string }>(r)),
+  listOrders: () =>
+    fetch('/api/v1/orders')
+      .then((r) => jsonOrThrow<{ orders: OrderDTO[] }>(r))
+      .then((d) => d.orders),
+  getOrder: (runId: string) =>
+    fetch(`/api/v1/orders/${encodeURIComponent(runId)}`)
+      .then((r) => jsonOrThrow<{ order: OrderDTO | null }>(r))
+      .then((d) => d.order),
+  answerOrderQuestion: (runId: string, askId: string, answers: Record<string, string | string[]>) =>
+    fetch(`/api/v1/orders/${encodeURIComponent(runId)}/answer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ askId, answers }),
+    }).then((r) => planResult<{ ok: boolean; reason?: string }>(r)),
+  reRunOrder: (runId: string, instructions?: string) =>
+    fetch(`/api/v1/orders/${encodeURIComponent(runId)}/rerun`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(instructions ? { instructions } : {}),
+    }).then((r) => planResult<{ ok: boolean; reason?: string }>(r)),
+  approveOrder: (runId: string, order?: string[], release = true) =>
+    fetch(`/api/v1/orders/${encodeURIComponent(runId)}/approve`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...(order ? { order } : {}), release }),
+    }).then((r) =>
+      planResult<{
+        approved: boolean;
+        reason?: string;
+        applied?: number;
+        skipped?: string[];
+        released?: boolean;
+      }>(r),
+    ),
+  cancelOrder: (runId: string) =>
+    fetch(`/api/v1/orders/${encodeURIComponent(runId)}/cancel`, { method: 'POST' }).then((r) =>
+      jsonOrThrow<{ cancelled: boolean }>(r),
+    ),
+  orderLogStream: (runId: string) =>
+    new EventSource(`/api/v1/orders/${encodeURIComponent(runId)}/logs`),
   /** Poke the orchestrator to poll + dispatch immediately (rate-limited server-side). */
   refresh: () => fetch('/api/v1/refresh', { method: 'POST' }).then((r) => r.ok),
   logStream: (issueId: string) =>

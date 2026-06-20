@@ -1,8 +1,16 @@
 import type { NormalizedIssue } from '@symphony/shared';
 
-/** Sort candidates for dispatch: priority asc (nulls last), then oldest createdAt, then identifier. */
+/**
+ * Sort candidates for dispatch: rank asc (unranked last), then priority asc (nulls last), then oldest
+ * createdAt, then identifier. `rank` is the Sequence feature's resolved order — a ranked (sequenced)
+ * batch therefore dispatches ahead of unranked tickets, in order. With every `rank` absent this is
+ * byte-for-byte the legacy priority/createdAt/identifier order.
+ */
 export function sortForDispatch(issues: NormalizedIssue[]): NormalizedIssue[] {
   return [...issues].sort((a, b) => {
+    const ra = a.rank ?? Number.POSITIVE_INFINITY;
+    const rb = b.rank ?? Number.POSITIVE_INFINITY;
+    if (ra !== rb) return ra - rb;
     const pa = a.priority ?? Number.POSITIVE_INFINITY;
     const pb = b.priority ?? Number.POSITIVE_INFINITY;
     if (pa !== pb) return pa - pb;
@@ -38,11 +46,13 @@ export function retryDelay(
   return Math.floor(base / 2 + rng() * (base / 2));
 }
 
-/** A Todo issue is blocked when any blocker is in a non-terminal state (SPEC §8). */
-export function todoBlockedByNonTerminal(
-  issue: NormalizedIssue,
-  terminalStates: Set<string>,
-): boolean {
+/**
+ * An issue is blocked when any of its blockers is in a non-terminal state (SPEC §8). A blocker in
+ * ANY terminal state (Done/Closed but also Cancelled/Duplicate) counts as satisfied — a cancelled
+ * blocker must not deadlock its dependent. Applies in every active state (the Sequence feature
+ * populates `blockedBy`; legacy tickets have `[]` and are never gated).
+ */
+export function blockedByNonTerminal(issue: NormalizedIssue, terminalStates: Set<string>): boolean {
   return issue.blockedBy.some((b) => !terminalStates.has(b.state));
 }
 

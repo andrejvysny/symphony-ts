@@ -14,6 +14,7 @@ import { Board, type Live } from './board.js';
 import { AgentDrawer, AgentsView } from './agents.js';
 import { CreateTicketModal, TicketModal } from './modals.js';
 import { PlanModal } from './plan.js';
+import { SequenceView } from './sequence.js';
 import { CreateProjectModal, ManageProjectsModal, ProjectSwitcher } from './projects.js';
 import { SettingsModal } from './settings.js';
 import { UsageGauge } from './usage-gauge.js';
@@ -26,7 +27,7 @@ export function App() {
   const [meta, setMeta] = useState<RuntimeInfo | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<'board' | 'agents'>('board');
+  const [tab, setTab] = useState<'board' | 'agents' | 'sequence'>('board');
   const [showCreate, setShowCreate] = useState(false);
   const [createStateId, setCreateStateId] = useState<string | null>(null);
   const [selected, setSelected] = useState<BoardIssueDTO | null>(null);
@@ -266,6 +267,15 @@ export function App() {
             >
               Agents
             </button>
+            {caps?.order && (
+              <button
+                class={tab === 'sequence' ? 'on' : ''}
+                data-test="tab-sequence"
+                onClick={() => setTab('sequence')}
+              >
+                Sequence
+              </button>
+            )}
           </div>
           {!noProject && (
             <button
@@ -353,6 +363,10 @@ export function App() {
           now={now}
           onOpen={setAgentIssueId}
         />
+      )}
+
+      {!noProject && board && tab === 'sequence' && (
+        <SequenceView board={board} meta={meta} onChanged={() => void refresh()} />
       )}
 
       {showCreate && (

@@ -869,33 +869,50 @@ textarea {
   color: var(--faint);
 }
 .att {
-  position: relative;
   border: 1px solid var(--hairline);
   border-radius: 9px;
   overflow: hidden;
-  height: 110px;
   background: var(--board);
+  display: flex;
+  flex-direction: column;
+}
+.att-thumb {
+  position: relative;
+  height: 84px;
   display: flex;
   align-items: center;
   justify-content: center;
+  background: var(--surface);
+  border-bottom: 1px solid var(--hairline-2);
 }
-.att .name {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
+.att-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.att-thumb .ext {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--muted);
+}
+.att-cap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   padding: 7px 9px;
-  background: var(--att-scrim);
-  font-size: 11px;
-  color: var(--on-scrim);
+  min-width: 0;
+}
+.att-name {
+  font-size: 11.5px;
+  color: var(--fg-1);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.att .ext {
+.att-meta {
   font-family: var(--mono);
-  font-size: 13px;
-  color: var(--muted);
+  font-size: 10px;
+  color: var(--faint);
 }
 .att .rm {
   position: absolute;
@@ -910,6 +927,164 @@ textarea {
   font-size: 13px;
   cursor: pointer;
   padding: 0;
+}
+
+/* ---- ticket redesign: type badge, select icons, label add, markdown-in-context ---- */
+.type-badge {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 1px 7px;
+  border-radius: 5px;
+  color: var(--rose);
+  background: color-mix(in srgb, var(--rose) 14%, transparent);
+}
+.type-badge.feature {
+  color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 14%, transparent);
+}
+.type-badge.enhancement {
+  color: var(--purple);
+  background: color-mix(in srgb, var(--purple) 14%, transparent);
+}
+.type-badge.task,
+.type-badge.chore,
+.type-badge.docs {
+  color: var(--muted);
+  background: var(--hairline);
+}
+
+/* native <select> with a leading icon reflecting the current value */
+.select-icon {
+  position: relative;
+}
+.select-icon select {
+  width: 100%;
+}
+.select-icon.has-ic select {
+  padding-left: 30px;
+}
+.select-icon .si-ic {
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  font-size: 12px;
+  line-height: 1;
+}
+.select-icon .si-ic.sq {
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  background: var(--muted-2);
+}
+.select-icon .si-ic.sq.started {
+  background: var(--green);
+}
+.select-icon .si-ic.sq.completed {
+  background: var(--green-done);
+}
+.select-icon .si-ic.sq.canceled,
+.select-icon .si-ic.sq.cancelled {
+  background: var(--rose);
+}
+.select-icon .si-ic.prio {
+  font-weight: 700;
+}
+.select-icon .si-ic.prio.urgent {
+  color: var(--rose);
+}
+.select-icon .si-ic.prio.high {
+  color: var(--orange);
+}
+.select-icon .si-ic.prio.medium {
+  color: var(--amber);
+}
+.select-icon .si-ic.prio.low {
+  color: var(--muted-2);
+}
+
+/* inline "+ add" label chip + its reveal input */
+.label-add {
+  cursor: pointer;
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+  color: var(--muted-2);
+}
+.label-add:hover {
+  color: var(--fg-1);
+  border-color: var(--fg-2);
+}
+.label-add-input {
+  width: 92px;
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+  border-radius: 5px;
+}
+
+/* markdown rendered inside the description card + comment bodies */
+.md {
+  /* the description card sets white-space: pre-wrap for plain text; rendered markdown wants normal */
+  white-space: normal;
+}
+.md > :first-child {
+  margin-top: 0;
+}
+.md > :last-child {
+  margin-bottom: 0;
+}
+.md p {
+  margin: 0 0 8px;
+}
+.md .md-h {
+  margin: 10px 0 6px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.md ul,
+.md ol {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+.md li {
+  margin: 2px 0;
+}
+.md code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  padding: 0.5px 4px;
+}
+.md a {
+  color: var(--blue);
+  text-decoration: none;
+}
+.md a:hover {
+  text-decoration: underline;
+}
+.md .md-code {
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.md blockquote {
+  margin: 8px 0;
+  padding-left: 11px;
+  border-left: 2px solid var(--hairline);
+  color: var(--muted);
 }
 
 /* ---- ticket modal (Jira-like) ---- */
@@ -1086,7 +1261,8 @@ textarea {
   font-size: 12.5px;
   color: var(--fg-2);
   line-height: 1.55;
-  white-space: pre-wrap;
+  /* comment bodies render markdown (.md) now, so use normal whitespace, not plain-text pre-wrap */
+  white-space: normal;
 }
 .event {
   display: flex;
@@ -1796,6 +1972,9 @@ body.resizing-x {
 .desc-view {
   cursor: text;
   min-height: 44px;
+  /* the view card renders markdown (or a one-line placeholder), so it no longer needs the
+     plain-text pre-wrap that `.desc` sets for the edit flow — keep whitespace normal. */
+  white-space: normal;
 }
 .desc-view:hover {
   border-color: var(--border-strong);
@@ -3071,4 +3250,283 @@ body.resizing-x {
   border-radius: 9999px;
   border: 3px solid transparent;
   background-clip: padding-box;
+}
+
+/* ---- Sequence tab (LLM-ordered subset of Backlog tickets) ---- */
+.plan-badge.ordering {
+  color: var(--blue);
+  border-color: var(--blue-lane);
+  background: var(--blue-wash);
+}
+.info-banner {
+  margin: 10px 12px 0;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--blue-lane);
+  background: var(--blue-wash);
+  color: var(--blue);
+  font-size: 12.5px;
+}
+.sequence {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 16px 32px;
+  max-width: 920px;
+  width: 100%;
+  margin: 0 auto;
+}
+.seq-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.seq-title b {
+  font-size: 15px;
+}
+.seq-sub {
+  display: block;
+  color: var(--muted);
+  font-size: 12.5px;
+  margin-top: 3px;
+}
+.seq-headright {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+.seq-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.seq-empty {
+  padding: 36px 0;
+  color: var(--muted);
+}
+.seq-pick-list,
+.seq-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.seq-pick {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+  user-select: none;
+}
+.seq-pick:hover {
+  border-color: var(--border-strong, var(--blue-lane));
+}
+.seq-pick.on {
+  border-color: var(--blue-lane);
+  background: var(--blue-wash);
+}
+.seq-check {
+  width: 17px;
+  height: 17px;
+  flex: none;
+  border-radius: 5px;
+  border: 1px solid var(--hairline);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: #fff;
+}
+.seq-check.on {
+  background: var(--blue);
+  border-color: var(--blue);
+}
+.seq-id {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  color: var(--faint);
+  flex: none;
+}
+.seq-ttl {
+  font-size: 13px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.seq-instr {
+  width: 100%;
+  min-height: 60px;
+  resize: vertical;
+  padding: 9px 11px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+}
+.seq-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+.seq-foot-right {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.seq-count {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.seq-edited {
+  font-size: 11px;
+  color: var(--amber);
+}
+.seq-stepper {
+  margin: 6px 0 14px;
+}
+.seq-panel {
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 14px;
+}
+.seq-panel-h {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+.seq-analyzing {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13px;
+  color: var(--blue);
+  margin-bottom: 10px;
+}
+.seq-log {
+  max-height: 320px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.seq-summary {
+  font-size: 13px;
+  color: var(--fg);
+  margin-bottom: 12px;
+}
+.seq-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 10px 11px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface-2, var(--surface));
+}
+.seq-row[draggable='true'] {
+  cursor: grab;
+}
+.seq-row.dragover {
+  border-color: var(--blue);
+  box-shadow: 0 -2px 0 var(--blue) inset;
+}
+.seq-k {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--blue-wash);
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.seq-main {
+  flex: 1;
+  min-width: 0;
+}
+.seq-row-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.seq-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 3px;
+}
+.seq-blocked {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.seq-warn {
+  font-size: 11.5px;
+  color: var(--amber);
+}
+.seq-why {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 5px;
+}
+.seq-grip {
+  flex: none;
+  color: var(--faint);
+  cursor: grab;
+}
+
+/* Sequence badges on the board card + ticket detail */
+.pill.seq {
+  color: var(--blue);
+  background: var(--blue-wash);
+  font-family: var(--mono, ui-monospace, monospace);
+  letter-spacing: 0;
+}
+.card-deps {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dep-icon {
+  color: var(--amber);
+  flex: none;
+}
+.seq-info {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 5px;
+}
+.seq-deps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--muted);
 }

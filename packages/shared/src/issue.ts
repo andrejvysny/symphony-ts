@@ -102,6 +102,69 @@ export interface IssuePlan {
   updatedAt: string;
 }
 
+/** Lifecycle of a Sequence ordering run (read-only analysis of a subset of Backlog tickets). */
+export type OrderStatus = 'ordering' | 'awaiting_input' | 'ready' | 'approved' | 'failed';
+
+/** A selected ticket snapshotted into an order run (so the review survives later ticket edits). */
+export interface OrderTicketRef {
+  id: string;
+  identifier: string;
+  title: string;
+}
+
+/** One ticket's place in the proposed sequence: which selected tickets block it, and why it's here. */
+export interface OrderProposalTicket {
+  id: string;
+  /** Ids of OTHER selected tickets that must be implemented before this one. */
+  blockedBy: string[];
+  rationale: string;
+}
+
+/** The agent's (or operator-edited) proposed ordering for the selected subset. */
+export interface OrderProposal {
+  /** Selected ticket ids in the recommended implementation order (earliest first). */
+  order: string[];
+  /** Per-ticket dependency + rationale (one entry per selected ticket). */
+  tickets: OrderProposalTicket[];
+  summary: string;
+  /** True when the operator manually reordered after the agent proposed. */
+  editedByUser?: boolean;
+}
+
+/**
+ * A Sequence ordering run: a read-only agent analysis over a SUBSET of Backlog tickets that proposes
+ * the best implementation order + the dependencies between them. Persisted as a batch artifact keyed
+ * by `runId` (it spans many tickets, so unlike {@link IssuePlan} it can't live on one issue). The
+ * Q&A reuses {@link PlanAsk}. On approve the orchestrator commits `rank` + `blockedBy` onto the
+ * tickets and moves them to the entry lane.
+ */
+export interface OrderRun {
+  runId: string;
+  status: OrderStatus;
+  /** The selected subset, snapshotted at start. */
+  selected: OrderTicketRef[];
+  /** The operator's free-text steer from the Sequence tab (folded into the agent's first prompt). */
+  customInstructions?: string;
+  /** The proposed ordering; absent until the agent first submits. */
+  proposal?: OrderProposal;
+  /** Agent session to resume for re-runs / pause-mode Q&A. */
+  sessionId?: string;
+  /** The currently-open question batch awaiting an operator answer (null/absent when none). */
+  pendingAsk?: PlanAsk | null;
+  /** Answered question batches, oldest-first. */
+  qa: PlanAsk[];
+  /** Bumped on each agent (re)generation of the proposal. */
+  revision: number;
+  /** On approve: true → tickets were moved to the entry lane (queued); false → committed but kept in Backlog. */
+  released?: boolean;
+  /** Why the last ordering run failed (operator-facing); set on `status:'failed'`. */
+  error?: string;
+  /** Classified category of {@link error} for a tailored UI hint. */
+  errorCategory?: ErrorCategory;
+  createdAt: string;
+  updatedAt: string;
+}
+
 /**
  * Tracker-neutral issue model. All adapters normalize their native payloads
  * into this shape. Mirrors SPEC §3 (issue model) and the Elixir `Linear.Issue`.
@@ -112,6 +175,14 @@ export interface NormalizedIssue {
   title: string;
   description: string | null;
   priority: number | null;
+  /**
+   * Dispatch sort key (lower = earlier), set by the Sequence feature. Omitted = unranked, which
+   * sorts AFTER every ranked ticket (and then by the usual priority/createdAt order). See
+   * `sortForDispatch`.
+   */
+  rank?: number;
+  /** Ticket type (bug/feature/task/…); omitted when unset. Renders as a breadcrumb badge. */
+  type?: string;
   state: string;
   branchName: string | null;
   url: string | null;
@@ -120,8 +191,8 @@ export interface NormalizedIssue {
   blockedBy: Blocker[];
   createdAt: string | null;
   updatedAt: string | null;
-  /** Attachment records (asset url + title) persisted on the issue; omitted when none. */
-  attachments?: Array<{ url: string; title: string }>;
+  /** Attachment records persisted on the issue (asset url + title + optional size/contentType); omitted when none. */
+  attachments?: Array<{ url: string; title: string; size?: number; contentType?: string }>;
   /** Per-task agent model override (e.g. `claude-opus-4-8`); falls back to `agent.model`. */
   model?: string;
   /** Per-task reasoning-effort override; falls back to `agent.effort`. */

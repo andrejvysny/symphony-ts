@@ -74,7 +74,7 @@ export {
   type WorkerDeps,
   type WorkerContext,
 } from './orchestrator/worker.js';
-export { sortForDispatch, retryDelay, todoBlockedByNonTerminal } from './orchestrator/dispatch.js';
+export { sortForDispatch, retryDelay, blockedByNonTerminal } from './orchestrator/dispatch.js';
 export {
   integrateUsage,
   emptyTokenState,

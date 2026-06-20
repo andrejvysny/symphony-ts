@@ -251,6 +251,88 @@ describe('FileTracker', () => {
     expect((await t.fetchActivity(issue.id)).map((a) => a.field)).not.toContain('usage');
   });
 
+  it('persists rank + blockedBy (silent), reads them back, and clears rank on null', async () => {
+    const t = make({ backlogState: 'Backlog' });
+    const issue = await t.createIssue({ title: 'x', stateName: 'Backlog' });
+    await t.updateIssue(issue.id, {
+      rank: 3,
+      blockedBy: [{ id: 'SYM-9', identifier: 'SYM-9', state: 'Todo' }],
+    });
+    let [fresh] = await t.fetchAllIssues();
+    expect(fresh?.rank).toBe(3);
+    expect(fresh?.blockedBy).toEqual([{ id: 'SYM-9', identifier: 'SYM-9', state: 'Todo' }]);
+    // rank/blockedBy are dispatch metadata — written silently (no activity spam).
+    const fields = (await t.fetchActivity(issue.id)).map((a) => a.field);
+    expect(fields).not.toContain('rank');
+    expect(fields).not.toContain('blockedBy');
+    // null rank clears back to unranked.
+    await t.updateIssue(issue.id, { rank: null });
+    [fresh] = await t.fetchAllIssues();
+    expect(fresh?.rank).toBeUndefined();
+  });
+
+  it('fetchCandidateIssues refreshes a blocker’s state and drops a deleted blocker', async () => {
+    const t = make();
+    const blocker = await t.createIssue({ title: 'blocker', stateName: 'Todo' });
+    const dep = await t.createIssue({ title: 'dep', stateName: 'Todo' });
+    // Record a stale snapshot (says Done) — the live blocker is actually Todo (non-terminal).
+    await t.updateIssue(dep.id, {
+      blockedBy: [{ id: blocker.id, identifier: blocker.identifier, state: 'Done' }],
+    });
+    const refreshed = (await t.fetchCandidateIssues()).find((i) => i.id === dep.id);
+    expect(refreshed?.blockedBy).toEqual([
+      { id: blocker.id, identifier: blocker.identifier, state: 'Todo' },
+    ]);
+    // Delete the blocker → its entry is dropped (a dangling blocker must never deadlock).
+    await t.deleteIssue(blocker.id);
+    const afterDelete = (await t.fetchCandidateIssues()).find((i) => i.id === dep.id);
+    expect(afterDelete?.blockedBy).toEqual([]);
+  });
+
+  it('persists an order run via updateOrder, reads it back, and lists newest-first', async () => {
+    const t = make();
+    expect(await t.getOrder('run-1')).toBeNull();
+    await t.updateOrder('run-1', (prev) => {
+      expect(prev).toBeUndefined();
+      return {
+        runId: 'run-1',
+        status: 'ordering',
+        selected: [{ id: 'SYM-1', identifier: 'SYM-1', title: 'a' }],
+        qa: [],
+        revision: 0,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      };
+    });
+    await t.updateOrder('run-1', (prev) => ({
+      ...prev!,
+      status: 'ready',
+      proposal: {
+        order: ['SYM-1'],
+        tickets: [{ id: 'SYM-1', blockedBy: [], rationale: 'first' }],
+        summary: 'one ticket',
+      },
+      revision: 1,
+    }));
+    await t.updateOrder('run-2', () => ({
+      runId: 'run-2',
+      status: 'ordering',
+      selected: [],
+      qa: [],
+      revision: 0,
+      createdAt: '2026-02-01T00:00:00.000Z',
+      updatedAt: '2026-02-01T00:00:00.000Z',
+    }));
+
+    const got = await t.getOrder('run-1');
+    expect(got?.status).toBe('ready');
+    expect(got?.proposal?.order).toEqual(['SYM-1']);
+    // listOrders is newest-first by createdAt.
+    expect((await t.listOrders()).map((o) => o.runId)).toEqual(['run-2', 'run-1']);
+    // A fresh tracker over the same dir reads the persisted run (survives reload).
+    expect((await make().getOrder('run-1'))?.revision).toBe(1);
+  });
+
   it('records comments and attachments', async () => {
     const t = make();
     const issue = await t.createIssue({ title: 'x' });

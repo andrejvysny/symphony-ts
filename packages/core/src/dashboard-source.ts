@@ -4,7 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AgentEvent, ClaudeUsageLimits } from '@symphony/agent-backends';
 import { getClaudeUsageLimits } from '@symphony/agent-backends';
-import type { AgentEffort, IssuePlan, PlanStatus, PlanTextAnchor } from '@symphony/shared';
+import type {
+  AgentEffort,
+  IssuePlan,
+  OrderRun,
+  PlanStatus,
+  PlanTextAnchor,
+} from '@symphony/shared';
 import {
   listProjectKeys,
   scaffoldProject,
@@ -14,6 +20,7 @@ import {
   supportsIssueCreation,
   supportsIssueRemoval,
   supportsIssueWriter,
+  supportsOrderStore,
   type IssuePatch,
   type LabelInfo,
 } from '@symphony/tracker';
@@ -43,6 +50,11 @@ export interface BoardIssueDTO {
   title: string;
   state: string;
   priority: number | null;
+  type: string | null;
+  /** Sequence dispatch order (lower = earlier); null = unranked. Drives within-lane card order. */
+  rank: number | null;
+  /** Identifiers of the tickets this one is blocked by (sequencing deps); empty when none. */
+  blocked_by: string[];
   labels: string[];
   url: string | null;
   status: IssueStatus;
@@ -73,6 +85,11 @@ export interface IssueDetailDTO {
   description: string | null;
   state: string;
   priority: number | null;
+  type: string | null;
+  /** Sequence dispatch order (lower = earlier); null = unranked. */
+  rank: number | null;
+  /** Identifiers of the tickets this one is blocked by (sequencing deps); empty when none. */
+  blocked_by: string[];
   labels: string[];
   url: string | null;
   createdAt: string | null;
@@ -80,8 +97,8 @@ export interface IssueDetailDTO {
   status: IssueStatus;
   activity: IssueActivityDTO[];
   comments: IssueCommentDTO[];
-  /** Attachment records persisted on the issue (asset url + title). */
-  attachments: Array<{ url: string; title: string }>;
+  /** Attachment records persisted on the issue (asset url + title + optional size/contentType). */
+  attachments: Array<{ url: string; title: string; size?: number; contentType?: string }>;
   /** Per-task agent overrides (null = inherit the global agent config). */
   model: string | null;
   effort: AgentEffort | null;
@@ -126,6 +143,8 @@ export interface IssueEditInput {
   title?: string;
   description?: string;
   priority?: number | null;
+  /** Ticket type (bug/feature/…); empty string clears it. */
+  type?: string;
   labels?: string[];
   /** Per-task agent overrides; null clears back to the global agent config. */
   model?: string | null;
@@ -220,6 +239,8 @@ export interface DashboardSource {
     projects: boolean;
     settings: boolean;
     usage_limits: boolean;
+    /** Whether the Sequence (ordering) feature is available (claude-sdk + order store + enabled). */
+    order: boolean;
     /** Whether a project is currently active; false → the dashboard shows a create/open prompt. */
     activeProject: boolean;
   };
@@ -277,6 +298,31 @@ export interface DashboardSource {
   ): Promise<{ ok: boolean }>;
   approvePlan(issueId: string): Promise<{ approved: boolean; reason?: string }>;
   cancelPlan(issueId: string): Promise<{ cancelled: boolean }>;
+  // ---- sequence (order) mode ----
+  startOrder(
+    ticketIds: string[],
+    customInstructions?: string,
+  ): Promise<{ started: boolean; runId?: string; reason?: string }>;
+  getOrder(runId: string): Promise<OrderRun | null>;
+  listOrders(): Promise<OrderRun[]>;
+  answerOrderQuestion(
+    runId: string,
+    askId: string,
+    answers: Record<string, string | string[]>,
+  ): Promise<{ ok: boolean; reason?: string }>;
+  reRunOrder(runId: string, customInstructions?: string): Promise<{ ok: boolean; reason?: string }>;
+  approveOrder(
+    runId: string,
+    finalOrder?: string[],
+    release?: boolean,
+  ): Promise<{
+    approved: boolean;
+    reason?: string;
+    applied?: number;
+    skipped?: string[];
+    released?: boolean;
+  }>;
+  cancelOrder(runId: string): Promise<{ cancelled: boolean }>;
   subscribeLogs(issueId: string, cb: (ev: AgentEvent) => void): () => void;
   /** Subscribe to global board/state changes (SSE); fires after every settled orchestrator mutation. */
   subscribeBoard(cb: () => void): () => void;
@@ -358,6 +404,8 @@ export function buildDashboardSource(
         // Gauge only renders for a Claude backend with the (opt-in) flag on; the gauge component
         // itself handles `available:false` (API-key mode / no token) so this stays a cheap gate.
         usage_limits: cfg.agent.usage_limits && cfg.agent.backend.startsWith('claude'),
+        order:
+          cfg.order.enabled && cfg.agent.backend === 'claude-sdk' && supportsOrderStore(tracker),
         activeProject: !!activeProjectId(cfg),
       };
     },
@@ -387,6 +435,16 @@ export function buildDashboardSource(
       orchestrator.resolvePlanComment(id, commentId, resolved),
     approvePlan: (id) => orchestrator.approvePlan(id),
     cancelPlan: (id) => orchestrator.cancelPlan(id),
+    // ---- sequence (order) mode ----
+    startOrder: (ids, customInstructions) => orchestrator.startOrder(ids, customInstructions),
+    getOrder: (runId) => orchestrator.getOrder(runId),
+    listOrders: () => orchestrator.listOrders(),
+    answerOrderQuestion: (runId, askId, answers) =>
+      orchestrator.answerOrderQuestion(runId, askId, answers),
+    reRunOrder: (runId, customInstructions) => orchestrator.reRunOrder(runId, customInstructions),
+    approveOrder: (runId, finalOrder, release) =>
+      orchestrator.approveOrder(runId, finalOrder, release),
+    cancelOrder: (runId) => orchestrator.cancelOrder(runId),
     subscribeLogs: (id, cb) => orchestrator.subscribeLogs(id, cb),
     subscribeBoard: (cb) => orchestrator.subscribeBoard(cb),
 
@@ -678,6 +736,9 @@ export function buildDashboardSource(
           title: i.title,
           state: i.state,
           priority: i.priority,
+          type: i.type ?? null,
+          rank: i.rank ?? null,
+          blocked_by: i.blockedBy.map((b) => b.identifier),
           labels: i.labels,
           url: i.url,
           status: statusOf(i.id, snap),
@@ -686,6 +747,12 @@ export function buildDashboardSource(
           plan_status: i.plan?.status ?? null,
         };
         (columns[i.state] ??= []).push(dto);
+      }
+      // Within a lane, show ranked (sequenced) tickets first in dispatch order, then unranked.
+      for (const list of Object.values(columns)) {
+        list.sort(
+          (a, b) => (a.rank ?? Number.POSITIVE_INFINITY) - (b.rank ?? Number.POSITIVE_INFINITY),
+        );
       }
       return { states, columns };
     },
@@ -732,6 +799,9 @@ export function buildDashboardSource(
         description: issue.description,
         state: issue.state,
         priority: issue.priority,
+        type: issue.type ?? null,
+        rank: issue.rank ?? null,
+        blocked_by: issue.blockedBy.map((b) => b.identifier),
         labels: issue.labels,
         url: issue.url,
         createdAt: issue.createdAt,
@@ -792,6 +862,7 @@ export function buildDashboardSource(
       if (edit.title !== undefined) patch.title = edit.title;
       if (edit.description !== undefined) patch.description = edit.description;
       if (edit.priority !== undefined) patch.priority = edit.priority;
+      if (edit.type !== undefined) patch.type = edit.type;
       if (edit.labels !== undefined) {
         // Resolve operator-supplied label names to ids; keep unknown names as-is so new labels (e.g.
         // the `rework` badge) persist — the file/memory stores use the label name as its id.
@@ -827,7 +898,10 @@ export function buildDashboardSource(
       const tracker = orchestrator.currentTracker();
       if (!supportsIssueWriter(tracker)) throw new Error('tracker does not support attachments');
       const { assetUrl } = await tracker.uploadFile(file);
-      await tracker.attachToIssue(issueId, assetUrl, file.filename);
+      await tracker.attachToIssue(issueId, assetUrl, file.filename, {
+        size: file.data.length,
+        contentType: file.contentType,
+      });
       return { url: assetUrl, title: file.filename };
     },
 

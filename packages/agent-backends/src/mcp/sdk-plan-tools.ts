@@ -25,7 +25,7 @@ export interface PlanToolDeps {
   submitPlan: (markdown: string, summary?: string) => Promise<string>;
 }
 
-const ASK_DESCRIPTION =
+export const ASK_DESCRIPTION =
   'Ask the operator one or more clarifying questions and WAIT for their answer before continuing. ' +
   'Use this — never AskUserQuestion — whenever a decision genuinely needs the human (ambiguous scope, ' +
   'a trade-off only they can pick, missing context you cannot infer from the repo). Batch related ' +
@@ -33,6 +33,50 @@ const ASK_DESCRIPTION =
   '2–4 labelled options (omit options for a free-text answer). If one option is the clear default, ' +
   'set recommended: true on it (at most one per question). Do not ask about things you can ' +
   'reasonably determine yourself by reading the code.';
+
+/** The `symphony_ask` tool's input shape (a `questions` array). Shared by the plan + order servers. */
+const ASK_SCHEMA = {
+  questions: z
+    .array(
+      z.object({
+        header: z.string().describe('Short chip label for the question (≤ ~12 chars).'),
+        question: z.string().describe('The question to ask the operator.'),
+        options: z
+          .array(
+            z.object({
+              label: z.string().describe('A selectable choice.'),
+              description: z
+                .string()
+                .optional()
+                .describe('What this choice means / its trade-off.'),
+              recommended: z
+                .boolean()
+                .optional()
+                .describe('Mark this as the recommended choice (at most one per question).'),
+            }),
+          )
+          .optional()
+          .describe('2–4 choices; omit entirely for a free-text answer.'),
+        multiSelect: z
+          .boolean()
+          .optional()
+          .describe('Allow the operator to select more than one option.'),
+      }),
+    )
+    .describe('One or more questions to ask the operator at once.'),
+} as const;
+
+/**
+ * Build the `symphony_ask` SDK tool bound to `ask` (blocks live / records-and-parks pause until the
+ * operator answers). Shared by the plan-mode and sequence-mode MCP servers so the ask contract stays
+ * identical across both.
+ */
+export function askTool(ask: (questions: AskQuestionInput[]) => Promise<string>) {
+  return tool('symphony_ask', ASK_DESCRIPTION, ASK_SCHEMA, async (args) => {
+    const text = await ask(args.questions as AskQuestionInput[]);
+    return { content: [{ type: 'text', text }], isError: false };
+  });
+}
 
 const SUBMIT_PLAN_DESCRIPTION =
   'Submit the FINAL implementation plan for operator review, as GitHub-flavored markdown. Call this ' +
@@ -50,46 +94,7 @@ export function buildPlanSdkMcpServer(deps: PlanToolDeps): Record<string, unknow
     name: 'symphony-plan',
     version: '0.1.0',
     tools: [
-      tool(
-        'symphony_ask',
-        ASK_DESCRIPTION,
-        {
-          questions: z
-            .array(
-              z.object({
-                header: z.string().describe('Short chip label for the question (≤ ~12 chars).'),
-                question: z.string().describe('The question to ask the operator.'),
-                options: z
-                  .array(
-                    z.object({
-                      label: z.string().describe('A selectable choice.'),
-                      description: z
-                        .string()
-                        .optional()
-                        .describe('What this choice means / its trade-off.'),
-                      recommended: z
-                        .boolean()
-                        .optional()
-                        .describe(
-                          'Mark this as the recommended choice (at most one per question).',
-                        ),
-                    }),
-                  )
-                  .optional()
-                  .describe('2–4 choices; omit entirely for a free-text answer.'),
-                multiSelect: z
-                  .boolean()
-                  .optional()
-                  .describe('Allow the operator to select more than one option.'),
-              }),
-            )
-            .describe('One or more questions to ask the operator at once.'),
-        },
-        async (args) => {
-          const text = await deps.ask(args.questions as AskQuestionInput[]);
-          return { content: [{ type: 'text', text }], isError: false };
-        },
-      ),
+      askTool(deps.ask),
       tool(
         'symphony_submit_plan',
         SUBMIT_PLAN_DESCRIPTION,

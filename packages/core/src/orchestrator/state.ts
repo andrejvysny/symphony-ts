@@ -1,5 +1,7 @@
-import type { AgentEvent, PlanToolDeps } from '@symphony/agent-backends';
+import type { OrderToolDeps, PlanToolDeps } from '@symphony/agent-backends';
+import type { AgentEvent } from '@symphony/agent-backends';
 import type { NormalizedIssue } from '@symphony/shared';
+import type { OrderRunControl } from './order-worker.js';
 import type { PlanRunControl } from './plan-worker.js';
 import { emptyTokenState, type TokenState } from './token-accounting.js';
 
@@ -45,9 +47,32 @@ export interface PlanRunEntry {
   deps?: PlanToolDeps;
 }
 
-/** A live-mode plan question awaiting an operator answer — resolves the agent's blocked `symphony_ask`. */
+/**
+ * A live ordering run (the Sequence track, parallel to execution + plan). Like {@link PlanRunEntry}
+ * it wraps a {@link RunningEntry} (whose synthetic issue's id === `runId`, so live-log routing keys
+ * by the run, not a ticket) plus the shared control flags + resolved Q&A mode, and remembers the
+ * selected subset + operator instructions for re-runs.
+ */
+export interface OrderRunEntry {
+  runId: string;
+  /** The selected subset's issue ids (for overlap guards). */
+  issueIds: string[];
+  run: RunningEntry;
+  control: OrderRunControl;
+  mode: 'live' | 'pause';
+  customInstructions?: string;
+  /** The run's order-tool executors (also handed to the SDK MCP server). Exposed for tests. */
+  deps?: OrderToolDeps;
+}
+
+/**
+ * A live-mode `symphony_ask` awaiting an operator answer — resolves the agent's blocked tool call.
+ * Carries the owning issue id (plan track) OR run id (order track) so teardown can reject the right
+ * subset.
+ */
 export interface PendingAsk {
-  issueId: string;
+  issueId?: string;
+  runId?: string;
   /** Resolve with the formatted answer text the agent's tool call returns. */
   resolve: (answersText: string) => void;
   reject: (err: Error) => void;
@@ -88,6 +113,8 @@ export interface OrchestratorState {
   resumeSessions: Map<string, string>;
   /** Live plan runs (the read-only "Plan" track), keyed by issue id. Shares the concurrency budget. */
   planRuns: Map<string, PlanRunEntry>;
+  /** Live ordering runs (the Sequence track), keyed by run id. Shares the concurrency budget. */
+  orderRuns: Map<string, OrderRunEntry>;
   /** Live-mode `symphony_ask` calls awaiting an operator answer, keyed by ask id. */
   pendingAsks: Map<string, PendingAsk>;
   totals: Totals;
@@ -106,6 +133,7 @@ export function createState(): OrchestratorState {
     retryAttempts: new Map(),
     resumeSessions: new Map(),
     planRuns: new Map(),
+    orderRuns: new Map(),
     pendingAsks: new Map(),
     totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0, secondsRunning: 0 },
     rateLimits: null,

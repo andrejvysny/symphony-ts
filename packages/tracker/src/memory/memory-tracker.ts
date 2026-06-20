@@ -1,4 +1,4 @@
-import type { IssuePlan, IssueStateRef, NormalizedIssue } from '@symphony/shared';
+import type { IssuePlan, IssueStateRef, NormalizedIssue, OrderRun } from '@symphony/shared';
 import type {
   BoardReader,
   CreateIssueInput,
@@ -7,11 +7,13 @@ import type {
   IssueRemover,
   IssueWriter,
   LabelInfo,
+  OrderStore,
   PlanStore,
   Tracker,
   UploadInput,
   WorkflowStateInfo,
 } from '../tracker.js';
+import { refreshBlockerStates } from '../tracker.js';
 
 export interface MemoryTrackerOptions {
   issues?: NormalizedIssue[];
@@ -47,10 +49,11 @@ function synthStates(active: string[], terminal: string[]): WorkflowStateInfo[] 
  * state transitions so a test can move an issue Todo → In Progress → Done.
  */
 export class MemoryTracker
-  implements Tracker, IssueCreator, BoardReader, IssueWriter, IssueRemover, PlanStore
+  implements Tracker, IssueCreator, BoardReader, IssueWriter, IssueRemover, PlanStore, OrderStore
 {
   readonly kind = 'memory';
   private readonly issues = new Map<string, NormalizedIssue>();
+  private readonly orders = new Map<string, OrderRun>();
   private readonly activeStates: Set<string>;
   private readonly states: WorkflowStateInfo[];
   readonly comments: Array<{ issueId: string; body: string }> = [];
@@ -65,9 +68,10 @@ export class MemoryTracker
   }
 
   async fetchCandidateIssues(): Promise<NormalizedIssue[]> {
-    return [...this.issues.values()]
-      .filter((i) => this.activeStates.has(i.state))
-      .map((i) => ({ ...i }));
+    const all = [...this.issues.values()];
+    const stateById = new Map(all.map((i) => [i.id, i.state]));
+    const candidates = all.filter((i) => this.activeStates.has(i.state)).map((i) => ({ ...i }));
+    return refreshBlockerStates(candidates, stateById);
   }
 
   async fetchIssuesByStates(states: string[]): Promise<NormalizedIssue[]> {
@@ -122,6 +126,11 @@ export class MemoryTracker
       else issue.effort = patch.effort;
     }
     if (patch.usage !== undefined) issue.usage = patch.usage;
+    if (patch.rank !== undefined) {
+      if (patch.rank === null) delete issue.rank;
+      else issue.rank = patch.rank;
+    }
+    if (patch.blockedBy !== undefined) issue.blockedBy = patch.blockedBy;
   }
 
   async addComment(issueId: string, body: string): Promise<void> {
@@ -152,6 +161,26 @@ export class MemoryTracker
 
   async getPlan(issueId: string): Promise<IssuePlan | null> {
     return this.issues.get(issueId)?.plan ?? null;
+  }
+
+  // ---- OrderStore ----
+  async updateOrder(
+    runId: string,
+    fn: (prev: OrderRun | undefined) => OrderRun,
+  ): Promise<OrderRun> {
+    const next = fn(this.orders.get(runId));
+    this.orders.set(runId, next);
+    return next;
+  }
+
+  async getOrder(runId: string): Promise<OrderRun | null> {
+    return this.orders.get(runId) ?? null;
+  }
+
+  async listOrders(): Promise<OrderRun[]> {
+    return [...this.orders.values()].sort((a, b) =>
+      a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0,
+    );
   }
 
   // ---- IssueRemover ----

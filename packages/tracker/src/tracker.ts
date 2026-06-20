@@ -1,9 +1,11 @@
 import type {
   AgentEffort,
+  Blocker,
   IssuePlan,
   IssueStateRef,
   IssueUsage,
   NormalizedIssue,
+  OrderRun,
 } from '@symphony/shared';
 
 /**
@@ -22,6 +24,28 @@ export interface Tracker {
 
   /** Current state for each id (used for active reconciliation). Missing ids are omitted. */
   fetchIssueStatesByIds(ids: string[]): Promise<IssueStateRef[]>;
+}
+
+/**
+ * Rewrite each issue's `blockedBy[].state` from the live `id → state` map so the dispatch gate
+ * (`blockedByNonTerminal`) always sees a blocker's CURRENT state, not the snapshot taken when the
+ * dependency was recorded. A blocker whose id is no longer present (deleted) is dropped — a dangling
+ * blocker must never deadlock its dependent. Called by trackers in `fetchCandidateIssues`.
+ */
+export function refreshBlockerStates(
+  issues: NormalizedIssue[],
+  stateById: Map<string, string>,
+): NormalizedIssue[] {
+  return issues.map((i) =>
+    i.blockedBy.length === 0
+      ? i
+      : {
+          ...i,
+          blockedBy: i.blockedBy
+            .filter((b) => stateById.has(b.id))
+            .map((b) => ({ ...b, state: stateById.get(b.id) as string })),
+        },
+  );
 }
 
 export interface CreateIssueInput {
@@ -84,6 +108,12 @@ export interface IssuePatch {
   description?: string;
   /** 1=urgent..4=low; null clears priority to "none". */
   priority?: number | null;
+  /** Dispatch sort key (lower = earlier); null clears it (back to unranked). Sequence-written. */
+  rank?: number | null;
+  /** Full replacement of the issue's blocker set (sequencing dependency edges). Sequence-written. */
+  blockedBy?: Blocker[];
+  /** Ticket type (bug/feature/…); empty string clears it. */
+  type?: string;
   /** Full replacement set of label ids (resolved from names by the dashboard source). */
   labelIds?: string[];
   /** Per-task agent overrides; null clears back to the global agent config. */
@@ -107,7 +137,12 @@ export interface IssueWriter {
   addComment(issueId: string, body: string): Promise<void>;
   /** Upload a file to the tracker; returns the permanent asset URL. */
   uploadFile(input: UploadInput): Promise<{ assetUrl: string }>;
-  attachToIssue(issueId: string, url: string, title?: string): Promise<void>;
+  attachToIssue(
+    issueId: string,
+    url: string,
+    title?: string,
+    meta?: { size?: number; contentType?: string },
+  ): Promise<void>;
 }
 
 export function supportsIssueWriter(t: Tracker): t is Tracker & IssueWriter {
@@ -143,6 +178,29 @@ export interface PlanStore {
 export function supportsPlanStore(t: Tracker): t is Tracker & PlanStore {
   const p = t as Partial<PlanStore>;
   return typeof p.updatePlan === 'function' && typeof p.getPlan === 'function';
+}
+
+/**
+ * Sequence-mode persistence: read-modify-write a batch {@link OrderRun} artifact keyed by `runId`
+ * (a sequencing run spans many tickets, so it has no per-issue home). Used by the orchestrator's
+ * ordering run + the dashboard order endpoints. Feature-gated on {@link supportsOrderStore}.
+ */
+export interface OrderStore {
+  /** Read-modify-write an order run (receives the current run or undefined; returns the next run). */
+  updateOrder(runId: string, fn: (prev: OrderRun | undefined) => OrderRun): Promise<OrderRun>;
+  /** The order run for `runId`, or null when none. */
+  getOrder(runId: string): Promise<OrderRun | null>;
+  /** All order runs for the active project (newest-first), for the Sequence tab + resume. */
+  listOrders(): Promise<OrderRun[]>;
+}
+
+export function supportsOrderStore(t: Tracker): t is Tracker & OrderStore {
+  const o = t as Partial<OrderStore>;
+  return (
+    typeof o.updateOrder === 'function' &&
+    typeof o.getOrder === 'function' &&
+    typeof o.listOrders === 'function'
+  );
 }
 
 /** A single change in an issue's history (created, state move, field edit, …). */

@@ -59,6 +59,28 @@ export function fmtCost(usd: number | null | undefined): string | null {
   return usd < 1 ? `$${usd.toFixed(2)}` : `$${usd.toFixed(usd < 100 ? 2 : 0)}`;
 }
 
+/** Relative time: "just now", "18m ago", "2h ago", "3d ago"; '' for missing/invalid. */
+export function relTime(iso?: string | null): string {
+  if (!iso) return '';
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '';
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+/** Compact byte size: "812 B", "248 KB", "1.2 MB"; '' for missing. */
+export function fmtBytes(n?: number | null): string {
+  if (n === null || n === undefined || n < 0) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 /** Compact "time until" a future ISO instant: "45m", "3h", "2d4h", or "now". */
 export function untilReset(iso: string, now: number): string {
   const ms = new Date(iso).getTime() - now;

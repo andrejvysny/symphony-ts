@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { makeIssue } from '../test-support.js';
-import { retryDelay, sortForDispatch, todoBlockedByNonTerminal } from './dispatch.js';
+import { blockedByNonTerminal, retryDelay, sortForDispatch } from './dispatch.js';
 
 describe('sortForDispatch', () => {
   it('orders by priority asc, then createdAt, then identifier', () => {
@@ -9,7 +9,27 @@ describe('sortForDispatch', () => {
     const c = makeIssue({ id: 'c', identifier: 'C-1', priority: 1, createdAt: '2024-01-01' });
     const d = makeIssue({ id: 'd', identifier: 'D-1', priority: null, createdAt: '2020-01-01' });
     const sorted = sortForDispatch([a, b, c, d]).map((i) => i.id);
-    expect(sorted).toEqual(['c', 'b', 'a', 'd']); // null priority sorts last
+    expect(sorted).toEqual(['c', 'b', 'a', 'd']); // null priority sorts last; no ranks → legacy order
+  });
+
+  it('rank is the primary key (lower first), ignoring priority among ranked tickets', () => {
+    // r2 outranks r1 by priority but has a higher rank → dispatches later.
+    const r1 = makeIssue({ id: 'r1', identifier: 'A-1', rank: 1, priority: 4 });
+    const r2 = makeIssue({ id: 'r2', identifier: 'B-1', rank: 2, priority: 1 });
+    expect(sortForDispatch([r2, r1]).map((i) => i.id)).toEqual(['r1', 'r2']);
+  });
+
+  it('ranked tickets sort before unranked, which keep the legacy order', () => {
+    const u1 = makeIssue({ id: 'u1', identifier: 'A-1', priority: 1, createdAt: '2024-01-01' });
+    const u2 = makeIssue({ id: 'u2', identifier: 'B-1', priority: null, createdAt: '2024-01-01' });
+    const r = makeIssue({ id: 'r', identifier: 'C-1', rank: 5, priority: null });
+    expect(sortForDispatch([u2, u1, r]).map((i) => i.id)).toEqual(['r', 'u1', 'u2']);
+  });
+
+  it('breaks a rank tie by priority then createdAt then identifier', () => {
+    const a = makeIssue({ id: 'a', identifier: 'A-1', rank: 1, priority: 2 });
+    const b = makeIssue({ id: 'b', identifier: 'B-1', rank: 1, priority: 1 });
+    expect(sortForDispatch([a, b]).map((i) => i.id)).toEqual(['b', 'a']);
   });
 });
 
@@ -37,20 +57,33 @@ describe('retryDelay', () => {
   });
 });
 
-describe('todoBlockedByNonTerminal', () => {
-  const terminal = new Set(['Done', 'Canceled']);
+describe('blockedByNonTerminal', () => {
+  const terminal = new Set(['Done', 'Canceled', 'Cancelled', 'Duplicate']);
   it('is blocked when a blocker is non-terminal', () => {
     const issue = makeIssue({
       id: 'x',
       blockedBy: [{ id: 'y', identifier: 'Y-1', state: 'In Progress' }],
     });
-    expect(todoBlockedByNonTerminal(issue, terminal)).toBe(true);
+    expect(blockedByNonTerminal(issue, terminal)).toBe(true);
   });
   it('is not blocked when all blockers are terminal', () => {
     const issue = makeIssue({
       id: 'x',
       blockedBy: [{ id: 'y', identifier: 'Y-1', state: 'Done' }],
     });
-    expect(todoBlockedByNonTerminal(issue, terminal)).toBe(false);
+    expect(blockedByNonTerminal(issue, terminal)).toBe(false);
+  });
+  it('treats a Cancelled/Duplicate blocker as satisfied (terminal of any kind)', () => {
+    const issue = makeIssue({
+      id: 'x',
+      blockedBy: [
+        { id: 'y', identifier: 'Y-1', state: 'Cancelled' },
+        { id: 'z', identifier: 'Z-1', state: 'Duplicate' },
+      ],
+    });
+    expect(blockedByNonTerminal(issue, terminal)).toBe(false);
+  });
+  it('an empty blocker set is never blocked', () => {
+    expect(blockedByNonTerminal(makeIssue({ id: 'x' }), terminal)).toBe(false);
   });
 });

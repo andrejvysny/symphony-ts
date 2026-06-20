@@ -38,7 +38,12 @@ const labelSchema = z.object({ id: z.string(), name: z.string() });
 
 const blockerSchema = z.object({ id: z.string(), identifier: z.string(), state: z.string() });
 
-const attachmentSchema = z.object({ url: z.string(), title: z.string() });
+const attachmentSchema = z.object({
+  url: z.string(),
+  title: z.string(),
+  size: z.number().optional(),
+  contentType: z.string().optional(),
+});
 
 const usageSchema = z.object({
   inputTokens: z.number(),
@@ -101,6 +106,9 @@ const storedIssueSchema = z.object({
   title: z.string(),
   description: z.string().nullable(),
   priority: z.number().nullable(),
+  /** Sequence dispatch sort key (lower = earlier); absent when unranked. */
+  rank: z.number().optional(),
+  type: z.string().optional(),
   state: z.string(),
   branchName: z.string().nullable(),
   url: z.string().nullable(),
@@ -118,6 +126,38 @@ const storedIssueSchema = z.object({
   plan: planSchema.optional(),
 });
 export type StoredIssue = z.infer<typeof storedIssueSchema>;
+
+// ---- sequence ordering run artifact (see @symphony/shared OrderRun) ----
+const orderTicketRefSchema = z.object({
+  id: z.string(),
+  identifier: z.string(),
+  title: z.string(),
+});
+const orderProposalSchema = z.object({
+  order: z.array(z.string()),
+  tickets: z.array(
+    z.object({ id: z.string(), blockedBy: z.array(z.string()), rationale: z.string() }),
+  ),
+  summary: z.string(),
+  editedByUser: z.boolean().optional(),
+});
+const orderRunSchema = z.object({
+  runId: z.string(),
+  status: z.enum(['ordering', 'awaiting_input', 'ready', 'approved', 'failed']),
+  selected: z.array(orderTicketRefSchema),
+  customInstructions: z.string().optional(),
+  proposal: orderProposalSchema.optional(),
+  sessionId: z.string().optional(),
+  pendingAsk: planAskSchema.nullable().optional(),
+  qa: z.array(planAskSchema),
+  revision: z.number(),
+  released: z.boolean().optional(),
+  error: z.string().optional(),
+  errorCategory: z.string().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type StoredOrderRun = z.infer<typeof orderRunSchema>;
 
 const commentSchema = z.object({ at: z.string(), body: z.string() });
 const activitySchema = z.object({
@@ -189,6 +229,7 @@ export class FileStore {
   readonly projectDir: string;
   private readonly issuesDir: string;
   private readonly uploadsDir: string;
+  private readonly ordersDir: string;
   private readonly metaFile: string;
   private readonly statesFile: string;
   private readonly labelsFile: string;
@@ -203,6 +244,7 @@ export class FileStore {
     this.projectDir = path.join(opts.dataRoot, 'projects', opts.projectKey);
     this.issuesDir = path.join(this.projectDir, 'issues');
     this.uploadsDir = path.join(this.projectDir, 'uploads');
+    this.ordersDir = path.join(this.projectDir, 'orders');
     this.metaFile = path.join(this.projectDir, 'meta.json');
     this.statesFile = path.join(this.projectDir, 'states.json');
     this.labelsFile = path.join(this.projectDir, 'labels.json');
@@ -458,6 +500,57 @@ export class FileStore {
       }
       await fs.rm(this.issueSubdir(id), { recursive: true, force: true });
     });
+  }
+
+  // ---- sequence ordering runs (orders/<runId>.json) ----
+
+  private orderFile(runId: string): string {
+    if (!SAFE_KEY.test(runId) || runId.includes('..'))
+      throw new Error(`unsafe order run id: ${runId}`);
+    return path.join(this.ordersDir, `${runId}.json`);
+  }
+
+  async readOrder(runId: string): Promise<StoredOrderRun | null> {
+    await this.ensureProject();
+    return this.readJson(this.orderFile(runId), orderRunSchema);
+  }
+
+  /**
+   * Create-or-update one order run under its file lock. `fn` receives the current run (or undefined
+   * on first write) and returns the next — mirrors {@link FileStore.mutateIssue}'s read-modify-write,
+   * but tolerates a not-yet-existing run (the orchestrator creates it on `startOrder`).
+   */
+  async writeOrder(
+    runId: string,
+    fn: (prev: StoredOrderRun | undefined) => StoredOrderRun,
+  ): Promise<StoredOrderRun> {
+    await this.ensureProject();
+    const file = this.orderFile(runId);
+    await fs.mkdir(this.ordersDir, { recursive: true });
+    return withFileLock(file, async () => {
+      const prev = await this.readJson(file, orderRunSchema);
+      const next = fn(prev ?? undefined);
+      await writeFileAtomic(file, JSON.stringify(next, null, 2));
+      return next;
+    });
+  }
+
+  async listOrders(): Promise<StoredOrderRun[]> {
+    await this.ensureProject();
+    let names: string[];
+    try {
+      names = await fs.readdir(this.ordersDir);
+    } catch (e) {
+      if (isErrno(e, 'ENOENT')) return [];
+      throw e;
+    }
+    const out: StoredOrderRun[] = [];
+    for (const name of names) {
+      if (!name.endsWith('.json')) continue;
+      const run = await this.readJson(path.join(this.ordersDir, name), orderRunSchema);
+      if (run) out.push(run);
+    }
+    return out;
   }
 
   // ---- states / labels ----

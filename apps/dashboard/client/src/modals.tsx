@@ -5,11 +5,22 @@ import {
   type BoardIssueDTO,
   type BoardStateDTO,
   type IssueDetailDTO,
+  ISSUE_TYPES,
   type LabelInfo,
   type RuntimeInfo,
   type SessionInfo,
 } from './api.js';
-import { describeActivity, fmt, fmtCost, fmtTokens, StatusPill } from './util.js';
+import { renderMd } from './markdown.js';
+import {
+  describeActivity,
+  fmt,
+  fmtBytes,
+  fmtCost,
+  fmtShort,
+  fmtTokens,
+  relTime,
+  StatusPill,
+} from './util.js';
 
 const PRIORITIES: { value: number | null; label: string }[] = [
   { value: 1, label: 'Urgent' },
@@ -36,6 +47,37 @@ const EFFORTS: { value: string; label: string }[] = [
   { value: 'xhigh', label: 'X-High' },
   { value: 'max', label: 'Max' },
 ];
+// Ticket type select options (derived from the shared ISSUE_TYPES so client/server stay in sync).
+const TYPE_OPTS: { value: string; label: string }[] = [
+  { value: '', label: 'None' },
+  ...ISSUE_TYPES.map((t) => ({ value: t, label: t[0]!.toUpperCase() + t.slice(1) })),
+];
+
+/** Priority → leading-icon glyph + color class (1=Urgent … 4=Low); null = None (no icon). */
+function priorityMeta(p: number | null): { icon: string; cls: string } | null {
+  switch (p) {
+    case 1:
+      return { icon: '⇈', cls: 'urgent' };
+    case 2:
+      return { icon: '↑↑', cls: 'high' };
+    case 3:
+      return { icon: '↑', cls: 'medium' };
+    case 4:
+      return { icon: '↓', cls: 'low' };
+    default:
+      return null;
+  }
+}
+
+/** Short "kind" label for an attachment, from its content-type (falling back to the extension). */
+function kindLabel(contentType?: string, url?: string): string {
+  if (contentType?.startsWith('image/')) return 'image';
+  if (contentType === 'application/pdf') return 'pdf';
+  if (contentType?.startsWith('text/') || /\.log(\?|$)/i.test(url ?? '')) return 'log';
+  const name = (url ?? '').split('/').pop() ?? '';
+  const ext = name.includes('.') ? name.split('.').pop() : undefined;
+  return ext ? ext.toLowerCase() : 'file';
+}
 
 interface Attachment {
   id: number;
@@ -286,7 +328,9 @@ export function TicketModal(props: {
   const [labels, setLabels] = useState<string[]>(i.labels);
   const [model, setModel] = useState('');
   const [effort, setEffort] = useState<'' | AgentEffort>('');
+  const [ticketType, setTicketType] = useState(i.type ?? '');
   const [labelInput, setLabelInput] = useState('');
+  const [addingLabel, setAddingLabel] = useState(false);
   const [labelOpts, setLabelOpts] = useState<LabelInfo[]>([]);
   const [dirty, setDirty] = useState(false);
   const dirtyRef = useRef(false);
@@ -327,6 +371,7 @@ export function TicketModal(props: {
         setLabels(d.labels);
         setModel(d.model ?? '');
         setEffort(d.effort ?? '');
+        setTicketType(d.type ?? '');
       }
     } catch (e) {
       setErr((e as Error).message);
@@ -343,6 +388,7 @@ export function TicketModal(props: {
   }, []);
 
   const currentState = detail?.state ?? i.state;
+  const curState = props.states.find((s) => s.name === currentState);
   const move = async (stateId: string) => {
     setBusy(true);
     try {
@@ -393,6 +439,7 @@ export function TicketModal(props: {
         title: title.trim(),
         description,
         priority,
+        type: ticketType,
         labels,
         model: model || null,
         effort: effort || null,
@@ -547,6 +594,9 @@ export function TicketModal(props: {
             <span class="scope">{scope}</span>
             <span style="color:var(--faint-2)">/</span>
             <span class="id">{i.identifier}</span>
+            {(ticketType || i.type) && (
+              <span class={`type-badge ${ticketType || i.type}`}>{ticketType || i.type}</span>
+            )}
             {i.status !== 'idle' && <StatusPill status={i.status} />}
           </div>
           <div class="head-actions" ref={menuRef}>
@@ -606,7 +656,12 @@ export function TicketModal(props: {
                   touch();
                 }}
               />
-              <div class="opened">Opened {fmt(detail?.createdAt ?? i.createdAt)}</div>
+              <div class="opened">
+                Opened by you
+                {relTime(detail?.createdAt ?? i.createdAt)
+                  ? ` · ${relTime(detail?.createdAt ?? i.createdAt)}`
+                  : ''}
+              </div>
             </div>
 
             {err && (
@@ -638,7 +693,7 @@ export function TicketModal(props: {
                   onClick={() => setEditingDesc(true)}
                 >
                   {description.trim() ? (
-                    description
+                    <div class="md">{renderMd(description)}</div>
                   ) : (
                     <span class="empty">Add a description… (markdown)</span>
                   )}
@@ -684,24 +739,28 @@ export function TicketModal(props: {
                 </div>
                 {attachments.map((a) => (
                   <div class="att" key={a.url}>
-                    {isImageUrl(a.url) ? (
-                      <img
-                        src={a.url}
-                        alt={a.title}
-                        style="width:100%;height:100%;object-fit:cover"
-                      />
-                    ) : (
-                      <span class="ext">{extOf(a.url)}</span>
-                    )}
-                    <button
-                      class="rm"
-                      data-test="att-remove"
-                      disabled={busy}
-                      onClick={() => void removeAtt(a.url)}
-                    >
-                      ×
-                    </button>
-                    <span class="name">{a.title}</span>
+                    <div class="att-thumb">
+                      {isImageUrl(a.url) ? (
+                        <img src={a.url} alt={a.title} />
+                      ) : (
+                        <span class="ext">{extOf(a.url)}</span>
+                      )}
+                      <button
+                        class="rm"
+                        data-test="att-remove"
+                        disabled={busy}
+                        onClick={() => void removeAtt(a.url)}
+                      >
+                        ×
+                      </button>
+                    </div>
+                    <div class="att-cap">
+                      <span class="att-name">{a.title}</span>
+                      <span class="att-meta">
+                        {a.size !== undefined ? `${fmtBytes(a.size)} · ` : ''}
+                        {kindLabel(a.contentType, a.url)}
+                      </span>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -725,9 +784,11 @@ export function TicketModal(props: {
                       <div class="avatar">•</div>
                       <div class="body">
                         <div class="by">
-                          <span class="when">{fmt(c.at)}</span>
+                          <span class="when" title={fmt(c.at)}>
+                            {relTime(c.at) || fmt(c.at)}
+                          </span>
                         </div>
-                        <div class="txt">{c.body}</div>
+                        <div class="txt md">{renderMd(c.body)}</div>
                       </div>
                     </div>
                   ))}
@@ -813,22 +874,28 @@ export function TicketModal(props: {
 
             <label class="field" style="margin:0">
               <span>Status</span>
-              <select
-                data-test="detail-state"
-                disabled={busy}
-                value={currentState}
-                onChange={(e) => {
-                  const name = (e.target as HTMLSelectElement).value;
-                  const st = props.states.find((s) => s.name === name);
-                  if (st && st.name !== currentState) void move(st.id);
-                }}
-              >
-                {props.states.map((s) => (
-                  <option key={s.id} value={s.name}>
-                    {s.name}
-                  </option>
-                ))}
-              </select>
+              <div class="select-icon has-ic">
+                <span
+                  class={`si-ic sq ${curState?.type ?? ''}`}
+                  style={curState?.color ? `background:${curState.color}` : ''}
+                />
+                <select
+                  data-test="detail-state"
+                  disabled={busy}
+                  value={currentState}
+                  onChange={(e) => {
+                    const name = (e.target as HTMLSelectElement).value;
+                    const st = props.states.find((s) => s.name === name);
+                    if (st && st.name !== currentState) void move(st.id);
+                  }}
+                >
+                  {props.states.map((s) => (
+                    <option key={s.id} value={s.name}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </label>
 
             <div class="field" style="margin:0">
@@ -841,19 +908,45 @@ export function TicketModal(props: {
 
             <label class="field" style="margin:0">
               <span>Priority</span>
+              <div class={`select-icon${priorityMeta(priority) ? ' has-ic' : ''}`}>
+                {priorityMeta(priority) && (
+                  <span class={`si-ic prio ${priorityMeta(priority)!.cls}`}>
+                    {priorityMeta(priority)!.icon}
+                  </span>
+                )}
+                <select
+                  data-test="edit-priority"
+                  disabled={busy}
+                  value={priority === null ? 'none' : String(priority)}
+                  onChange={(e) => {
+                    const v = (e.target as HTMLSelectElement).value;
+                    setPriority(v === 'none' ? null : Number(v));
+                    touch();
+                  }}
+                >
+                  {PRIORITIES.map((p) => (
+                    <option key={p.label} value={p.value === null ? 'none' : String(p.value)}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </label>
+
+            <label class="field" style="margin:0">
+              <span>Type</span>
               <select
-                data-test="edit-priority"
+                data-test="edit-type"
                 disabled={busy}
-                value={priority === null ? 'none' : String(priority)}
+                value={ticketType}
                 onChange={(e) => {
-                  const v = (e.target as HTMLSelectElement).value;
-                  setPriority(v === 'none' ? null : Number(v));
+                  setTicketType((e.target as HTMLSelectElement).value);
                   touch();
                 }}
               >
-                {PRIORITIES.map((p) => (
-                  <option key={p.label} value={p.value === null ? 'none' : String(p.value)}>
-                    {p.label}
+                {TYPE_OPTS.map((t) => (
+                  <option key={t.value} value={t.value}>
+                    {t.label}
                   </option>
                 ))}
               </select>
@@ -899,8 +992,7 @@ export function TicketModal(props: {
 
             <div>
               <div class="label">Labels</div>
-              <div class="chips" style="margin-bottom:8px">
-                {labels.length === 0 && <span class="empty">none</span>}
+              <div class="chips">
                 {labels.map((l) => (
                   <span class="chip dim label-chip" key={l}>
                     {l}
@@ -909,26 +1001,75 @@ export function TicketModal(props: {
                     </button>
                   </span>
                 ))}
+                {addingLabel ? (
+                  <input
+                    class="label-add-input"
+                    data-test="label-add"
+                    list="ticket-labels"
+                    placeholder="label…"
+                    autofocus
+                    value={labelInput}
+                    onInput={(e) => setLabelInput((e.target as HTMLInputElement).value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        addLabel(labelInput);
+                      } else if (e.key === 'Escape') {
+                        setAddingLabel(false);
+                        setLabelInput('');
+                      }
+                    }}
+                    onBlur={() => {
+                      if (!labelInput.trim()) setAddingLabel(false);
+                    }}
+                  />
+                ) : (
+                  <button
+                    class="chip label-add"
+                    data-test="label-add-toggle"
+                    onClick={() => setAddingLabel(true)}
+                  >
+                    + add
+                  </button>
+                )}
               </div>
-              <input
-                data-test="label-add"
-                list="ticket-labels"
-                placeholder="add label…"
-                value={labelInput}
-                onInput={(e) => setLabelInput((e.target as HTMLInputElement).value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    addLabel(labelInput);
-                  }
-                }}
-              />
               <datalist id="ticket-labels">
                 {labelOpts.map((l) => (
                   <option key={l.id} value={l.name} />
                 ))}
               </datalist>
             </div>
+
+            {(() => {
+              // Sequence info (read-only): position in the dispatch queue + resolved dependencies,
+              // committed by the Sequence tab's Auto-order. Prefer the freshly-loaded detail, fall
+              // back to the board card's values so it shows immediately.
+              const seqRank = detail?.rank ?? i.rank;
+              const seqDeps = detail?.blocked_by ?? i.blocked_by ?? [];
+              if (seqRank === null && seqDeps.length === 0) return null;
+              return (
+                <div data-test="ticket-sequence">
+                  <div class="label">Sequence</div>
+                  <div class="seq-info">
+                    {seqRank !== null && (
+                      <span class="pill seq" title="position in the dispatch queue">
+                        #{seqRank + 1} in queue
+                      </span>
+                    )}
+                    {seqDeps.length > 0 && (
+                      <div class="seq-deps" title={`blocked by ${seqDeps.join(', ')}`}>
+                        <span class="dep-icon">⛓</span> blocked by{' '}
+                        {seqDeps.map((d) => (
+                          <span class="chip dim" key={d}>
+                            {d}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
 
             {inReview && (
               <>
@@ -1008,7 +1149,8 @@ export function TicketModal(props: {
                 <div class="side-row">
                   <span class="k">Last run</span>
                   <span class="v">
-                    turn {props.session.turn_count}
+                    ⏱ turn {props.session.turn_count}
+                    {props.meta?.max_turns ? `/${props.meta.max_turns}` : ''}
                     {props.session.continuation_count > 0
                       ? ` · ↻${props.session.continuation_count}`
                       : ''}
@@ -1026,11 +1168,15 @@ export function TicketModal(props: {
               )}
               <div class="side-row">
                 <span class="k">Created</span>
-                <span class="v">{fmt(detail?.createdAt ?? i.createdAt)}</span>
+                <span class="v" title={fmt(detail?.createdAt ?? i.createdAt)}>
+                  {fmtShort(detail?.createdAt ?? i.createdAt) || '—'}
+                </span>
               </div>
               <div class="side-row">
                 <span class="k">Updated</span>
-                <span class="v">{fmt(detail?.updatedAt ?? i.updatedAt)}</span>
+                <span class="v" title={fmt(detail?.updatedAt ?? i.updatedAt)}>
+                  {relTime(detail?.updatedAt ?? i.updatedAt) || '—'}
+                </span>
               </div>
               {i.url && (
                 <div class="side-row">

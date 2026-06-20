@@ -77,6 +77,7 @@ function fakeSource(): DashboardSource {
       projects: true,
       settings: true,
       usage_limits: true,
+      order: true,
       activeProject: true,
     }),
     listProjects: vi.fn().mockResolvedValue({
@@ -204,6 +205,15 @@ function fakeSource(): DashboardSource {
     resolvePlanComment: vi.fn().mockResolvedValue({ ok: true }),
     approvePlan: vi.fn().mockResolvedValue({ approved: true }),
     cancelPlan: vi.fn().mockResolvedValue({ cancelled: true }),
+    startOrder: vi.fn().mockResolvedValue({ started: true, runId: 'run-1' }),
+    getOrder: vi.fn().mockResolvedValue(null),
+    listOrders: vi.fn().mockResolvedValue([]),
+    answerOrderQuestion: vi.fn().mockResolvedValue({ ok: true }),
+    reRunOrder: vi.fn().mockResolvedValue({ ok: true }),
+    approveOrder: vi
+      .fn()
+      .mockResolvedValue({ approved: true, applied: 2, skipped: [], released: true }),
+    cancelOrder: vi.fn().mockResolvedValue({ cancelled: true }),
     subscribeLogs: vi.fn().mockReturnValue(() => {}),
     subscribeBoard: vi.fn().mockReturnValue(() => {}),
   };
@@ -506,11 +516,53 @@ describe('dashboard server', () => {
       projects: true,
       settings: true,
       usage_limits: true,
+      order: true,
       activeProject: true,
     });
     expect((await app.inject({ method: 'POST', url: '/api/v1/capabilities' })).statusCode).toBe(
       405,
     );
+    await app.close();
+  });
+
+  it('starts an ordering run and routes approve to the source', async () => {
+    const source = fakeSource();
+    const app = createDashboardServer(source);
+
+    const tooFew = await app.inject({
+      method: 'POST',
+      url: '/api/v1/orders',
+      payload: { ticketIds: ['a'] },
+    });
+    expect(tooFew.statusCode).toBe(400);
+    expect(tooFew.json().error.code).toBe('need_two_tickets');
+
+    const started = await app.inject({
+      method: 'POST',
+      url: '/api/v1/orders',
+      payload: { ticketIds: ['a', 'b', 'c'], instructions: 'go' },
+    });
+    expect(started.statusCode).toBe(200);
+    expect(started.json().runId).toBe('run-1');
+    expect(source.startOrder).toHaveBeenCalledWith(['a', 'b', 'c'], 'go');
+
+    const approve = await app.inject({
+      method: 'POST',
+      url: '/api/v1/orders/run-1/approve',
+      payload: { order: ['a', 'b', 'c'] },
+    });
+    expect(approve.statusCode).toBe(200);
+    expect(approve.json().applied).toBe(2);
+    // release defaults to true (queue to entry lane).
+    expect(source.approveOrder).toHaveBeenCalledWith('run-1', ['a', 'b', 'c'], true);
+
+    // release:false → apply but keep in Backlog.
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/orders/run-1/approve',
+      payload: { order: ['a', 'b', 'c'], release: false },
+    });
+    expect(source.approveOrder).toHaveBeenCalledWith('run-1', ['a', 'b', 'c'], false);
     await app.close();
   });
 

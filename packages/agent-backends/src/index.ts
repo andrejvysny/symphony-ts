@@ -69,6 +69,15 @@ export {
 } from './mcp/sdk-memory-tool.js';
 export {
   buildPlanSdkMcpServer,
+  askTool,
+  ASK_DESCRIPTION,
   type PlanToolDeps,
   type AskQuestionInput,
 } from './mcp/sdk-plan-tools.js';
+export {
+  buildOrderSdkMcpServer,
+  validateOrderSubmission,
+  type OrderToolDeps,
+  type OrderSubmission,
+  type OrderSubmissionTicket,
+} from './mcp/sdk-order-tools.js';

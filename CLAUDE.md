@@ -103,15 +103,28 @@ behind one `CodingAgentBackend` interface — Claude Agent SDK and a CLI stream-
   is not applied there).
 - The orchestrator is **mostly** read-only on the tracker — the agent moves tickets via the semantic
   tracker tools and may only set active + `review_state`, never a terminal state. The orchestrator
-  itself writes the tracker in four narrow spots: `markInProgressOnPickup` (entry-lane → In Progress on
+  itself writes the tracker in five narrow spots: `markInProgressOnPickup` (entry-lane → In Progress on
   dispatch, awaited), `finalizeTerminal` (worktree-mode merge-on-accept comment),
-  `migrateDroppedStates` (one-time Rework/Merging → In Progress), and `persistUsage` (cumulative
+  `migrateDroppedStates` (one-time Rework/Merging → In Progress), `persistUsage` (cumulative
   per-task token/cost usage written onto the issue's `usage` field on every worker exit — best-effort,
-  the only metadata write). CLI-backend writes funnel through the orchestrator's bridge.
-- The file store keeps state id === state name; `blockedBy` is always `[]` (auto-skip disabled). The
-  orchestrator's active/terminal classification comes from `config.tracker.{active,terminal}_states`
-  (state **names**); `states.json` is display-only (lane order + type/color) and tolerates drift (an
-  issue in a state missing from it still gets a board lane).
+  the only metadata write), and `commitOrder` (the Sequence-approve path: writes `rank` + `blockedBy`
+  then moves the batch Backlog → entry lane). CLI-backend writes funnel through the orchestrator's bridge.
+- The file store keeps state id === state name. `blockedBy` is `[]` for every non-sequenced ticket; the
+  **Sequence** feature (`approveOrder` → `commitOrder`) is the only thing that populates it, which
+  activates the `blockedByNonTerminal` dispatch gate (`dispatch.ts`). `fetchCandidateIssues` refreshes
+  each blocker's `state` from the live issue set (`refreshBlockerStates`) and drops deleted blockers, so
+  the gate is never stale and a dangling blocker can't deadlock. The orchestrator's active/terminal
+  classification comes from `config.tracker.{active,terminal}_states` (state **names**); `states.json`
+  is display-only (lane order + type/color) and tolerates drift (an issue in a state missing from it
+  still gets a board lane).
+- **Sequence mode** (the "Sequence" tab, claude-sdk only): a parallel, manually-triggered, read-only
+  run that orders a SUBSET of Backlog tickets by dependency. Mirrors Plan mode — `orchestrator`'s
+  `startOrder`/`dispatchOrder`/`onOrderSubmit`/`approveOrder`/`cancelOrder`/`reRunOrder` own the
+  `state.orderRuns` map (keyed by `runId`, shares `availableSlots`); `order-worker.ts` is the single
+  `permissionMode:'plan'` run; `agent-backends/src/mcp/sdk-order-tools.ts` = `symphony_ask` (reused) +
+  `symphony_submit_order`; the proposal persists as a batch `OrderRun` artifact (`OrderStore`,
+  `<projectDir>/orders/<runId>.json`). Dispatch order = `rank` primary in `sortForDispatch`. UI:
+  `apps/dashboard/client/src/sequence.tsx`.
 - Token accounting uses absolute totals only (delta = max(0, next − lastReported)).
 - Worktree-mode workspaces/branches are preserved after success; on a terminal transition the
   orchestrator runs `finalizeTerminal` — for a **completed** terminal (Done/Closed) it merges the issue
@@ -127,9 +140,8 @@ behind one `CodingAgentBackend` interface — Claude Agent SDK and a CLI stream-
   (maps to the SDK's `maxTurns`; `runOpts.maxTurns` is otherwise never set). Continuation re-dispatch is
   bounded by `agent.max_continuations` (default 1, `0` = unlimited): on exhaustion the issue is moved to
   `blocked` for operator input instead of looping — so a stuck task surfaces after ≤2 runs, not ~1000.
-  The turn-loop + continuation machinery is kept intact and configurable (raise the caps) for future
-  staged execution (blockers/ordering), which already has dispatch scaffolding (`blockedBy` +
-  `todoBlockedByNonTerminal`).
+  The turn-loop + continuation machinery is kept intact and configurable (raise the caps) for staged
+  execution (blockers/ordering), now live via the Sequence feature (`blockedBy` + `blockedByNonTerminal`).
 - **Claude path = the in-process SDK backend** (`claude-sdk`, the default): one `query()` runs the full
   agentic loop, tracker tools run in-process (no bridge), with clean `resume`/`canUseTool`/`maxBudgetUsd`.
   The `cli-stream-json` adapter is for non-Claude agents (codex/opencode), which drive the tracker over

@@ -206,6 +206,33 @@ export const planSchema = z
   })
   .strict();
 
+/**
+ * Sequence-mode config (the read-only "ordering" run launched from the Sequence tab over a SUBSET of
+ * Backlog tickets). Mirrors {@link planSchema} — forces `permissionMode:'plan'`, defaults to stronger
+ * reasoning — but operates on N tickets and produces a dependency-ordered sequence, not a per-ticket
+ * plan. Feature-gated on the claude-sdk backend + a tracker order store.
+ */
+export const orderSchema = z
+  .object({
+    /** Master switch for the Sequence feature (hides the tab/endpoints when false). */
+    enabled: z.boolean().default(true),
+    /** How a sequencing question is surfaced — same semantics as `plan.qa_mode`. */
+    qa_mode: z.enum(['live', 'pause']).default('live'),
+    /** Reasoning effort for ordering runs. */
+    effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).default('high'),
+    /** Thinking mode for ordering runs (SDK `thinking`). */
+    thinking: z.enum(['adaptive', 'disabled']).default('adaptive'),
+    /** Optional model override for ordering runs (falls back to `agent.model`). */
+    model: z.string().optional(),
+    /** APPEND text layered on the order system-prompt preset; overrides the built-in contract. */
+    system_prompt: z.string().optional(),
+    /** Backend idle watchdog for ordering runs (ms); auto-disabled while a question is pending. */
+    idle_timeout_ms: z.number().int().nonnegative().default(300_000),
+    /** Hard cap on tickets per ordering run (bounds prompt size). */
+    max_subset_size: z.number().int().positive().default(20),
+  })
+  .strict();
+
 export const serverSchema = z
   .object({
     port: z.number().int().nonnegative().optional(),
@@ -241,6 +268,7 @@ export const configSchema = z
     hooks: hooksSchema.prefault({}),
     agent: agentSchema.prefault({}),
     plan: planSchema.prefault({}),
+    order: orderSchema.prefault({}),
     server: serverSchema.optional(),
     worker: workerSchema.optional(),
     codex: codexSchema.optional(),
@@ -253,6 +281,7 @@ export type TrackerConfig = z.infer<typeof trackerSchema>;
 export type ProjectEntry = z.infer<typeof projectEntrySchema>;
 export type AgentConfig = z.infer<typeof agentSchema>;
 export type PlanConfig = z.infer<typeof planSchema>;
+export type OrderConfig = z.infer<typeof orderSchema>;
 export type WorkspaceConfig = z.infer<typeof workspaceSchema>;
 export type HooksConfig = z.infer<typeof hooksSchema>;
 export type ServerConfig = z.infer<typeof serverSchema>;

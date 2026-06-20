@@ -1,4 +1,4 @@
-import type { IssuePlan, IssueStateRef, NormalizedIssue } from '@symphony/shared';
+import type { IssuePlan, IssueStateRef, NormalizedIssue, OrderRun } from '@symphony/shared';
 import type {
   ActivityReader,
   BoardReader,
@@ -10,11 +10,13 @@ import type {
   IssueRemover,
   IssueWriter,
   LabelInfo,
+  OrderStore,
   PlanStore,
   Tracker,
   UploadInput,
   WorkflowStateInfo,
 } from '../tracker.js';
+import { refreshBlockerStates } from '../tracker.js';
 import { FileStore, type StoredIssue } from './store.js';
 
 export interface FileTrackerOptions {
@@ -86,7 +88,8 @@ export class FileTracker
     IssueWriter,
     IssueRemover,
     ActivityReader,
-    PlanStore
+    PlanStore,
+    OrderStore
 {
   readonly kind = 'file';
   readonly store: FileStore;
@@ -124,7 +127,20 @@ export class FileTracker
       blockedBy: s.blockedBy,
       createdAt: s.createdAt,
       updatedAt: s.updatedAt,
-      ...(s.attachments !== undefined ? { attachments: s.attachments } : {}),
+      ...(s.rank !== undefined ? { rank: s.rank } : {}),
+      ...(s.type !== undefined ? { type: s.type } : {}),
+      // Map attachments explicitly: zod's `.optional()` widens size/contentType to `| undefined`,
+      // which exactOptionalPropertyTypes rejects when spread into NormalizedIssue's `size?: number`.
+      ...(s.attachments !== undefined
+        ? {
+            attachments: s.attachments.map((a) => ({
+              url: a.url,
+              title: a.title,
+              ...(a.size !== undefined ? { size: a.size } : {}),
+              ...(a.contentType !== undefined ? { contentType: a.contentType } : {}),
+            })),
+          }
+        : {}),
       ...(s.model !== undefined ? { model: s.model } : {}),
       ...(s.effort !== undefined ? { effort: s.effort } : {}),
       // Map usage explicitly: zod's `.optional()` widens costUsd to `number | undefined`, which
@@ -148,9 +164,14 @@ export class FileTracker
 
   // ---- Tracker (read) ----
   async fetchCandidateIssues(): Promise<NormalizedIssue[]> {
-    return (await this.store.listIssues())
+    const all = await this.store.listIssues();
+    // Live id → state map over ALL issues so a candidate's blocker (which may itself be terminal and
+    // thus not a candidate) is judged by its CURRENT state, and a deleted blocker is dropped.
+    const stateById = new Map(all.map((i) => [i.id, i.state]));
+    const candidates = all
       .filter((i) => this.activeStates.has(i.state))
       .map((i) => FileTracker.toNormalized(i));
+    return refreshBlockerStates(candidates, stateById);
   }
 
   async fetchIssuesByStates(states: string[]): Promise<NormalizedIssue[]> {
@@ -217,6 +238,14 @@ export class FileTracker
         changes.push(activity('priority', str(issue.priority), str(patch.priority)));
         next.priority = patch.priority;
       }
+      if (patch.type !== undefined) {
+        const nextType = patch.type || undefined; // '' clears
+        if (nextType !== issue.type) {
+          changes.push(activity('type', issue.type ?? null, nextType ?? null));
+          if (nextType === undefined) delete next.type;
+          else next.type = nextType;
+        }
+      }
       if (patch.labelIds !== undefined) {
         changes.push(activity('labels', issue.labels.join(','), patch.labelIds.join(',')));
         next.labels = patch.labelIds;
@@ -240,6 +269,13 @@ export class FileTracker
       // Usage is an orchestrator-written metadata field, not an operator edit — persist it
       // silently (no activity entry) to avoid flooding the history on every worker exit.
       if (patch.usage !== undefined) next.usage = patch.usage;
+      // rank/blockedBy are Sequence-written dispatch metadata — persist silently (no activity spam
+      // across a sequenced batch). null rank clears back to unranked.
+      if (patch.rank !== undefined) {
+        if (patch.rank === null) delete next.rank;
+        else next.rank = patch.rank;
+      }
+      if (patch.blockedBy !== undefined) next.blockedBy = patch.blockedBy;
       return next;
     });
     for (const c of changes) await this.store.appendActivity(issueId, c);
@@ -253,10 +289,23 @@ export class FileTracker
     return { assetUrl: await this.store.writeUpload(input.filename, input.data) };
   }
 
-  async attachToIssue(issueId: string, url: string, title?: string): Promise<void> {
+  async attachToIssue(
+    issueId: string,
+    url: string,
+    title?: string,
+    meta?: { size?: number; contentType?: string },
+  ): Promise<void> {
     await this.store.mutateIssue(issueId, (issue) => ({
       ...issue,
-      attachments: [...(issue.attachments ?? []), { url, title: title ?? url }],
+      attachments: [
+        ...(issue.attachments ?? []),
+        {
+          url,
+          title: title ?? url,
+          ...(meta?.size !== undefined ? { size: meta.size } : {}),
+          ...(meta?.contentType !== undefined ? { contentType: meta.contentType } : {}),
+        },
+      ],
       updatedAt: now(),
     }));
     await this.store.appendActivity(issueId, {
@@ -349,6 +398,29 @@ export class FileTracker
   async getPlan(issueId: string): Promise<IssuePlan | null> {
     const s = await this.store.readIssue(issueId);
     return s?.plan !== undefined ? (s.plan as IssuePlan) : null;
+  }
+
+  // ---- OrderStore ----
+  // The stored order run is zod-validated against the same shape as OrderRun; its optional fields
+  // infer as `T | undefined` (vs OrderRun's `T`), so cast at this boundary (as with the plan store).
+  async updateOrder(
+    runId: string,
+    fn: (prev: OrderRun | undefined) => OrderRun,
+  ): Promise<OrderRun> {
+    const next = await this.store.writeOrder(runId, (prev) => fn(prev as OrderRun | undefined));
+    return next as OrderRun;
+  }
+
+  async getOrder(runId: string): Promise<OrderRun | null> {
+    const s = await this.store.readOrder(runId);
+    return s ? (s as OrderRun) : null;
+  }
+
+  async listOrders(): Promise<OrderRun[]> {
+    const runs = (await this.store.listOrders()) as OrderRun[];
+    return runs.sort((a, b) =>
+      a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0,
+    );
   }
 
   // ---- ActivityReader ----

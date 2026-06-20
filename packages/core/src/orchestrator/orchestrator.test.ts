@@ -681,14 +681,18 @@ describe('Orchestrator', () => {
     expect(backend.calls.length).toBeGreaterThan(2);
   });
 
-  it('does not dispatch a Todo issue blocked by a non-terminal blocker', async () => {
+  it('does not dispatch an issue blocked by a non-terminal blocker', async () => {
     const backend = new MockBackend([{ status: 'success' }]);
+    // The blocker is a real, live ticket in a non-active, non-terminal lane (Backlog) so it both
+    // gates issue 5 and is not itself dispatched. Its blockedBy snapshot is stale ('In Progress'),
+    // proving the dispatch gate uses the blocker's CURRENT state (refreshed in fetchCandidateIssues).
+    const blocker = makeIssue({ id: 'x', identifier: 'X-1', state: 'Backlog' });
     const issue = makeIssue({
       id: '5',
       state: 'Todo',
       blockedBy: [{ id: 'x', identifier: 'X-1', state: 'In Progress' }],
     });
-    const { orchestrator } = setup({ issues: [issue], backend });
+    const { orchestrator } = setup({ issues: [blocker, issue], backend });
     await orchestrator.runOnce();
     await flush(orchestrator);
     expect(backend.calls.length).toBe(0);

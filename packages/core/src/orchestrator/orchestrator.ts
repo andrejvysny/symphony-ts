@@ -1,19 +1,26 @@
 import { randomUUID } from 'node:crypto';
 import {
   AGENT_DEFS,
+  buildOrderSdkMcpServer,
   buildPlanSdkMcpServer,
   detectAgent,
+  validateOrderSubmission,
   type AgentEvent,
   type AskQuestionInput,
   type CodingAgentBackend,
   type McpConfig,
+  type OrderSubmission,
+  type OrderToolDeps,
   type PlanToolDeps,
 } from '@symphony/agent-backends';
 import type {
+  Blocker,
   ErrorCategory,
   IssuePlan,
   IssueUsage,
   NormalizedIssue,
+  OrderProposal,
+  OrderRun,
   PlanAsk,
   PlanComment,
   PlanQuestion,
@@ -23,6 +30,7 @@ import {
   type Tracker,
   supportsBoard,
   supportsIssueWriter,
+  supportsOrderStore,
   supportsPlanStore,
 } from '@symphony/tracker';
 import type { SymphonyConfig } from '../config/resolve.js';
@@ -37,17 +45,20 @@ import {
 } from '../prompt/plan-prompt.js';
 import type { IWorkspaceManager } from '../workspace/manager.js';
 import {
+  blockedByNonTerminal,
   hasRequiredFields,
   retryDelay,
   sortForDispatch,
-  todoBlockedByNonTerminal,
 } from './dispatch.js';
+import { runOrderWorker, type OrderOutcome, type OrderRunControl } from './order-worker.js';
+import { orderAnswersPrompt, orderInitialPrompt } from '../prompt/order-prompt.js';
 import { runPlanWorker, type PlanOutcome, type PlanRunControl } from './plan-worker.js';
 import {
   createState,
   EVENT_BUFFER_CAP,
   newRunningEntry,
   type OrchestratorState,
+  type OrderRunEntry,
   type PlanRunEntry,
   type RunningEntry,
 } from './state.js';
@@ -276,6 +287,7 @@ export class Orchestrator {
     this.state.retryAttempts.clear();
     for (const entry of this.state.running.values()) entry.abort.abort();
     for (const entry of this.state.planRuns.values()) entry.run.abort.abort();
+    for (const entry of this.state.orderRuns.values()) entry.run.abort.abort();
     this.rejectAllPendingAsks('orchestrator stopping');
     await this.queue.catch(() => undefined);
   }
@@ -385,6 +397,9 @@ export class Orchestrator {
       if (gate) return { started: false, reason: gate };
       if (this.state.planRuns.has(issueId))
         return { started: false, reason: 'a plan run is already active' };
+      for (const e of this.state.orderRuns.values())
+        if (e.issueIds.includes(issueId))
+          return { started: false, reason: 'this ticket is in an active ordering run' };
       if (this.availableSlots() <= 0) return { started: false, reason: 'no available agent slot' };
       const issue = await this.findIssueById(issueId);
       if (!issue) return { started: false, reason: 'issue not found' };
@@ -647,6 +662,18 @@ export class Orchestrator {
     }
   }
 
+  private rejectPendingAsksForRun(runId: string, reason: string): void {
+    for (const [askId, p] of this.state.pendingAsks) {
+      if (p.runId !== runId) continue;
+      this.state.pendingAsks.delete(askId);
+      try {
+        p.reject(new Error(reason));
+      } catch {
+        /* an already-settled promise must not break teardown */
+      }
+    }
+  }
+
   private rejectAllPendingAsks(reason: string): void {
     for (const [, p] of this.state.pendingAsks) {
       try {
@@ -708,14 +735,9 @@ export class Orchestrator {
     );
   }
 
-  /** Executor for the agent's `symphony_ask` tool: persist the question, then block (live) or park (pause). */
-  private async onPlanAsk(
-    issueId: string,
-    entry: PlanRunEntry,
-    questions: AskQuestionInput[],
-  ): Promise<string> {
-    const askId = randomUUID();
-    const planQuestions: PlanQuestion[] = questions.map((q) => ({
+  /** Normalize the agent's `symphony_ask` input into persisted {@link PlanQuestion}s (id-assigned). */
+  private toPlanQuestions(questions: AskQuestionInput[]): PlanQuestion[] {
+    return questions.map((q) => ({
       id: randomUUID(),
       header: q.header,
       question: q.question,
@@ -730,6 +752,16 @@ export class Orchestrator {
           }
         : {}),
     }));
+  }
+
+  /** Executor for the agent's `symphony_ask` tool: persist the question, then block (live) or park (pause). */
+  private async onPlanAsk(
+    issueId: string,
+    entry: PlanRunEntry,
+    questions: AskQuestionInput[],
+  ): Promise<string> {
+    const askId = randomUUID();
+    const planQuestions = this.toPlanQuestions(questions);
     const ask: PlanAsk = {
       id: askId,
       at: new Date(this.now()).toISOString(),
@@ -825,6 +857,557 @@ export class Orchestrator {
     this.emitBoardChanged();
   }
 
+  // ---- sequence mode (the "Order" track: LLM-ordered SUBSET of Backlog tickets) ----
+
+  /** The order run artifact for the dashboard, or null when none / tracker has no order store. */
+  async getOrder(runId: string): Promise<OrderRun | null> {
+    return supportsOrderStore(this.tracker) ? this.tracker.getOrder(runId) : null;
+  }
+
+  /** All order runs for the active project (newest-first); empty when the tracker has no order store. */
+  async listOrders(): Promise<OrderRun[]> {
+    return supportsOrderStore(this.tracker) ? this.tracker.listOrders() : [];
+  }
+
+  /** Test seam: the live ordering run's tool executors (so tests can drive ask/submit_order). */
+  orderRunDepsForTest(runId: string): OrderToolDeps | undefined {
+    return this.state.orderRuns.get(runId)?.deps;
+  }
+
+  private orderPreconditions(): string | null {
+    if (!this.config.order.enabled) return 'the sequence feature is disabled';
+    if (this.config.agent.backend !== 'claude-sdk')
+      return 'sequencing requires the claude-sdk backend';
+    if (!supportsOrderStore(this.tracker)) return 'the active tracker does not support sequencing';
+    return null;
+  }
+
+  /** A fresh base order run when none exists yet; returns the existing run unchanged otherwise. */
+  private requireOrder(runId: string, p: OrderRun | undefined): OrderRun {
+    if (p) return p;
+    const ts = new Date(this.now()).toISOString();
+    return {
+      runId,
+      status: 'ordering',
+      selected: [],
+      qa: [],
+      revision: 0,
+      createdAt: ts,
+      updatedAt: ts,
+    };
+  }
+
+  /** Read-modify-write the order run (best-effort; auto-stamps updatedAt). */
+  private async persistOrder(
+    runId: string,
+    fn: (p: OrderRun | undefined) => OrderRun,
+  ): Promise<OrderRun | undefined> {
+    const tracker = this.tracker;
+    if (!supportsOrderStore(tracker)) return undefined;
+    try {
+      return await tracker.updateOrder(runId, (prev) => ({
+        ...fn(prev),
+        updatedAt: new Date(this.now()).toISOString(),
+      }));
+    } catch (e) {
+      this.logger.warn({ run_id: runId, error: String(e) }, 'failed to persist order run');
+      return undefined;
+    }
+  }
+
+  /** Re-fetch the run's selected issues by their snapshotted ids (dropping any that no longer exist). */
+  private async resolveOrderIssues(run: OrderRun): Promise<NormalizedIssue[]> {
+    if (!supportsBoard(this.tracker)) return [];
+    const all = await this.tracker.fetchAllIssues().catch(() => []);
+    const byId = new Map(all.map((i) => [i.id, i]));
+    const out: NormalizedIssue[] = [];
+    for (const ref of run.selected) {
+      const i = byId.get(ref.id);
+      if (i) out.push(i);
+    }
+    return out;
+  }
+
+  /**
+   * Launch a read-only ordering run over a SUBSET of Backlog tickets. Validates the subset (all exist,
+   * all in Backlog, 2..max), reserves a slot, persists an `ordering` artifact, and dispatches.
+   */
+  async startOrder(
+    ticketIds: string[],
+    customInstructions?: string,
+  ): Promise<{ started: boolean; runId?: string; reason?: string }> {
+    return this.enqueue(async () => {
+      const gate = this.orderPreconditions();
+      if (gate) return { started: false, reason: gate };
+      const ids = [...new Set(ticketIds)];
+      if (ids.length < 2)
+        return { started: false, reason: 'select at least 2 tickets to sequence' };
+      if (ids.length > this.config.order.max_subset_size)
+        return {
+          started: false,
+          reason: `select at most ${this.config.order.max_subset_size} tickets`,
+        };
+      if (this.availableSlots() <= 0) return { started: false, reason: 'no available agent slot' };
+      if (!supportsBoard(this.tracker))
+        return { started: false, reason: 'tracker does not support board reads' };
+      const all = await this.tracker.fetchAllIssues().catch(() => []);
+      const byId = new Map(all.map((i) => [i.id, i]));
+      const backlog = this.config.tracker.backlog_state;
+      const issues: NormalizedIssue[] = [];
+      for (const id of ids) {
+        const issue = byId.get(id);
+        if (!issue) return { started: false, reason: `ticket ${id} not found` };
+        if (backlog && issue.state !== backlog)
+          return { started: false, reason: `${issue.identifier} is not in ${backlog}` };
+        if (this.state.running.has(id) || this.state.planRuns.has(id))
+          return { started: false, reason: `${issue.identifier} is busy in another run` };
+        issues.push(issue);
+      }
+      for (const e of this.state.orderRuns.values())
+        if (e.issueIds.some((id) => ids.includes(id)))
+          return { started: false, reason: 'a selected ticket is already in another ordering run' };
+
+      const runId = randomUUID();
+      const sorted = sortForDispatch(issues);
+      const instructions = customInstructions?.trim();
+      const ts = new Date(this.now()).toISOString();
+      await this.persistOrder(runId, () => ({
+        runId,
+        status: 'ordering',
+        selected: sorted.map((i) => ({ id: i.id, identifier: i.identifier, title: i.title })),
+        ...(instructions ? { customInstructions: instructions } : {}),
+        qa: [],
+        revision: 0,
+        createdAt: ts,
+        updatedAt: ts,
+      }));
+      this.dispatchOrder(runId, sorted, {
+        prompt: orderInitialPrompt(sorted, instructions),
+        ...(instructions !== undefined ? { customInstructions: instructions } : {}),
+      });
+      this.emitBoardChanged();
+      return { started: true, runId };
+    });
+  }
+
+  /** Answer the ordering run's pending question (live → resume in-session; pause → re-dispatch). */
+  async answerOrderQuestion(
+    runId: string,
+    askId: string,
+    answers: Record<string, string | string[]>,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    return this.enqueue(async () => {
+      if (!supportsOrderStore(this.tracker))
+        return { ok: false, reason: 'tracker does not support sequencing' };
+      let matched: PlanQuestion[] | undefined;
+      const updated = await this.persistOrder(runId, (p) => {
+        const base = this.requireOrder(runId, p);
+        if (!base.pendingAsk || base.pendingAsk.id !== askId) return base; // stale / no pending → no-op
+        matched = base.pendingAsk.questions;
+        const answered: PlanAsk = {
+          ...base.pendingAsk,
+          answers,
+          answeredAt: new Date(this.now()).toISOString(),
+        };
+        return { ...base, status: 'ordering', pendingAsk: null, qa: [...base.qa, answered] };
+      });
+      if (!matched) return { ok: false, reason: 'no matching pending question' };
+      const pending = this.state.pendingAsks.get(askId);
+      if (pending) {
+        this.state.pendingAsks.delete(askId);
+        pending.resolve(formatPlanAnswers(matched, answers));
+        this.emitBoardChanged();
+        return { ok: true };
+      }
+      // Pause mode: re-dispatch, resuming the session with the answers.
+      if (this.state.orderRuns.has(runId))
+        return { ok: false, reason: 'ordering run still active' };
+      if (this.availableSlots() <= 0)
+        return { ok: false, reason: 'no available agent slot to resume' };
+      if (!updated) return { ok: false, reason: 'order run not found' };
+      const issues = await this.resolveOrderIssues(updated);
+      if (issues.length < 2) return { ok: false, reason: 'fewer than 2 selected tickets remain' };
+      const sorted = sortForDispatch(issues);
+      this.dispatchOrder(runId, sorted, {
+        prompt: orderAnswersPrompt(matched, answers),
+        ...(updated.sessionId !== undefined ? { resumeSessionId: updated.sessionId } : {}),
+        ...(updated.customInstructions !== undefined
+          ? { customInstructions: updated.customInstructions }
+          : {}),
+      });
+      this.emitBoardChanged();
+      return { ok: true };
+    });
+  }
+
+  /** Re-run the ordering agent (fresh analysis, optionally with new instructions; resumes the session). */
+  async reRunOrder(
+    runId: string,
+    customInstructions?: string,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    return this.enqueue(async () => {
+      const gate = this.orderPreconditions();
+      if (gate) return { ok: false, reason: gate };
+      if (this.state.orderRuns.has(runId))
+        return { ok: false, reason: 'an ordering run is already active' };
+      if (this.availableSlots() <= 0) return { ok: false, reason: 'no available agent slot' };
+      if (!supportsOrderStore(this.tracker))
+        return { ok: false, reason: 'tracker does not support sequencing' };
+      const run = await this.tracker.getOrder(runId);
+      if (!run) return { ok: false, reason: 'order run not found' };
+      if (run.status === 'approved')
+        return { ok: false, reason: 'this order was already approved' };
+      const issues = await this.resolveOrderIssues(run);
+      if (issues.length < 2) return { ok: false, reason: 'fewer than 2 selected tickets remain' };
+      const instructions = customInstructions?.trim() || run.customInstructions;
+      await this.persistOrder(runId, (p) => {
+        const base = this.requireOrder(runId, p);
+        const next: OrderRun = { ...base, status: 'ordering', pendingAsk: null };
+        delete next.error;
+        delete next.errorCategory;
+        return next;
+      });
+      const sorted = sortForDispatch(issues);
+      this.dispatchOrder(runId, sorted, {
+        prompt: orderInitialPrompt(sorted, instructions),
+        ...(run.sessionId !== undefined ? { resumeSessionId: run.sessionId } : {}),
+        ...(instructions !== undefined ? { customInstructions: instructions } : {}),
+      });
+      this.emitBoardChanged();
+      return { ok: true };
+    });
+  }
+
+  /**
+   * Approve a ready order: commit `rank` + `blockedBy` onto each selected ticket so the resolved
+   * sequence + dependencies become visible and drive dispatch. `release` (default true) also moves the
+   * batch Backlog → entry lane so it runs immediately; `release:false` records the order but KEEPS the
+   * tickets in Backlog (the badges show, but nothing dispatches until they're moved to the entry lane).
+   * `finalOrder` is the operator's (possibly drag-reordered) order; absent → the agent's proposal.
+   * Dependency edges are filtered to those consistent with the final linear order → acyclic by construction.
+   */
+  async approveOrder(
+    runId: string,
+    finalOrder?: string[],
+    release = true,
+  ): Promise<{
+    approved: boolean;
+    reason?: string;
+    applied?: number;
+    skipped?: string[];
+    released?: boolean;
+  }> {
+    return this.enqueue(async () => {
+      const tracker = this.tracker;
+      if (!supportsOrderStore(tracker))
+        return { approved: false, reason: 'tracker does not support sequencing' };
+      if (this.state.orderRuns.has(runId))
+        return { approved: false, reason: 'an ordering run is still active' };
+      const run = await tracker.getOrder(runId);
+      if (!run) return { approved: false, reason: 'order run not found' };
+      if (run.pendingAsk) return { approved: false, reason: 'answer the pending question first' };
+      if (!run.proposal) return { approved: false, reason: 'no proposed order to approve' };
+
+      // Final order = operator override (sanitized to the selected set) or the agent proposal; any
+      // selected id missing from the override is appended in proposal order (never silently dropped).
+      const selectedIds = new Set(run.selected.map((s) => s.id));
+      const source = finalOrder && finalOrder.length > 0 ? finalOrder : run.proposal.order;
+      const order: string[] = [];
+      const seen = new Set<string>();
+      for (const id of source)
+        if (selectedIds.has(id) && !seen.has(id)) {
+          order.push(id);
+          seen.add(id);
+        }
+      for (const id of run.proposal.order)
+        if (selectedIds.has(id) && !seen.has(id)) {
+          order.push(id);
+          seen.add(id);
+        }
+      const edited =
+        finalOrder !== undefined && JSON.stringify(order) !== JSON.stringify(run.proposal.order);
+
+      const result = await this.commitOrder(run, order, release);
+      await this.persistOrder(runId, (p) => {
+        const base = this.requireOrder(runId, p);
+        const prop = base.proposal ?? run.proposal!;
+        return {
+          ...base,
+          status: 'approved',
+          released: release,
+          pendingAsk: null,
+          proposal: { ...prop, order, editedByUser: edited || prop.editedByUser === true },
+        };
+      });
+      if (release) this.scheduleTick(0);
+      this.emitBoardChanged();
+      return {
+        approved: true,
+        applied: result.applied,
+        skipped: result.skipped,
+        released: release,
+      };
+    });
+  }
+
+  /**
+   * Commit the resolved order: for each ticket at index k write `rank = k` and `blockedBy` (the
+   * proposal's edges into it, FILTERED to blockers that precede it in `order` → acyclic by
+   * construction). When `move` is true, also move it Backlog → entry lane (queue it for dispatch);
+   * otherwise it stays in Backlog with the order recorded. Re-reads live state to skip tickets that
+   * drifted out of Backlog or were deleted (reported back). Best-effort per ticket.
+   */
+  private async commitOrder(
+    run: OrderRun,
+    order: string[],
+    move: boolean,
+  ): Promise<{ applied: number; skipped: string[] }> {
+    const tracker = this.tracker;
+    if (!supportsIssueWriter(tracker)) return { applied: 0, skipped: [] };
+    const proposalEdges = new Map((run.proposal?.tickets ?? []).map((t) => [t.id, t.blockedBy]));
+    const position = new Map(order.map((id, idx) => [id, idx]));
+    const all = supportsBoard(tracker) ? await tracker.fetchAllIssues().catch(() => []) : [];
+    const byId = new Map(all.map((i) => [i.id, i]));
+    const backlog = this.config.tracker.backlog_state;
+    const entryLane = this.config.tracker.active_states[0];
+    const skipped: string[] = [];
+    let applied = 0;
+    for (let k = 0; k < order.length; k++) {
+      const id = order[k] as string;
+      const issue = byId.get(id);
+      if (!issue) {
+        skipped.push(id);
+        continue;
+      }
+      if (backlog && issue.state !== backlog) {
+        skipped.push(issue.identifier);
+        continue;
+      }
+      const blockedBy: Blocker[] = (proposalEdges.get(id) ?? [])
+        .filter((b) => {
+          const bp = position.get(b);
+          return b !== id && bp !== undefined && bp < k;
+        })
+        .map((b) => byId.get(b))
+        .filter((bi): bi is NormalizedIssue => bi !== undefined)
+        .map((bi) => ({ id: bi.id, identifier: bi.identifier, state: bi.state }));
+      try {
+        await tracker.updateIssue(id, { rank: k, blockedBy });
+        if (move && entryLane) await tracker.updateIssueState(id, entryLane);
+        applied += 1;
+      } catch (e) {
+        this.logger.warn(
+          { issue_id: id, error: String(e) },
+          'commitOrder: failed to commit/move ticket',
+        );
+        skipped.push(issue.identifier);
+      }
+    }
+    return { applied, skipped };
+  }
+
+  /** Abort a live ordering run (or clear a parked/awaiting run when none is active). */
+  async cancelOrder(runId: string): Promise<{ cancelled: boolean }> {
+    return this.enqueue(async () => {
+      this.rejectPendingAsksForRun(runId, 'ordering cancelled');
+      const entry = this.state.orderRuns.get(runId);
+      if (entry) {
+        entry.run.abort.abort(); // onOrderWorkerExit finalizes status
+        return { cancelled: true };
+      }
+      await this.persistOrder(runId, (p) =>
+        p
+          ? {
+              ...this.requireOrder(runId, p),
+              status: p.proposal ? 'ready' : 'failed',
+              pendingAsk: null,
+            }
+          : this.requireOrder(runId, p),
+      );
+      this.emitBoardChanged();
+      return { cancelled: false };
+    });
+  }
+
+  // ---- order run internals ----
+
+  /** Launch an ordering run: build the per-run order MCP server (closures over this run) and stream it. */
+  private dispatchOrder(
+    runId: string,
+    issues: NormalizedIssue[],
+    opts: { prompt: string; resumeSessionId?: string; customInstructions?: string },
+  ): void {
+    const anchor = issues[0] as NormalizedIssue;
+    // Synthetic issue whose id === runId so live-log routing (onAgentEvent → logSubscribers by
+    // issue.id) keys by the RUN, not a ticket; the real anchor is passed to the worker separately.
+    const syntheticIssue: NormalizedIssue = {
+      ...anchor,
+      id: runId,
+      identifier: `order:${runId.slice(0, 8)}`,
+    };
+    const run = newRunningEntry(syntheticIssue, 0, this.now());
+    const control: OrderRunControl = { submitted: false, parkedAskId: null };
+    const entry: OrderRunEntry = {
+      runId,
+      issueIds: issues.map((i) => i.id),
+      run,
+      control,
+      mode: this.config.order.qa_mode,
+      ...(opts.customInstructions !== undefined
+        ? { customInstructions: opts.customInstructions }
+        : {}),
+    };
+    this.state.orderRuns.set(runId, entry);
+
+    const selectedIds = new Set(issues.map((i) => i.id));
+    const deps: OrderToolDeps = {
+      ask: (questions) => this.onOrderAsk(runId, entry, questions),
+      submitOrder: (submission) => this.onOrderSubmit(runId, entry, selectedIds, submission),
+    };
+    entry.deps = deps;
+    const orderMcp: McpConfig = { sdkServers: () => buildOrderSdkMcpServer(deps) };
+
+    const log = this.logger.child({ run_id: runId });
+    log.info(
+      { tickets: issues.length, ...(opts.resumeSessionId ? { resuming: true } : {}) },
+      'dispatching ordering run',
+    );
+
+    const ctx = {
+      runId,
+      anchorIssue: anchor,
+      prompt: opts.prompt,
+      signal: run.abort.signal,
+      emit: (ev: AgentEvent) => this.onAgentEvent(run, ev),
+      onSession: (sid: string) => {
+        run.sessionId = sid;
+      },
+      onWorktree: (p: string) => {
+        run.workspacePath = p;
+      },
+      control,
+      ...(opts.resumeSessionId !== undefined ? { resumeSessionId: opts.resumeSessionId } : {}),
+    };
+
+    void runOrderWorker(
+      {
+        workspaceManager: this.workspaceManager,
+        backend: this.backend,
+        config: this.config,
+        mcpConfig: orderMcp,
+      },
+      ctx,
+    ).then(
+      (outcome) => this.enqueue(() => this.onOrderWorkerExit(runId, outcome)),
+      (err) =>
+        this.enqueue(() => this.onOrderWorkerExit(runId, { kind: 'failed', error: String(err) })),
+    );
+  }
+
+  /** Executor for the agent's `symphony_ask` tool on an ordering run: block (live) or park (pause). */
+  private async onOrderAsk(
+    runId: string,
+    entry: OrderRunEntry,
+    questions: AskQuestionInput[],
+  ): Promise<string> {
+    const askId = randomUUID();
+    const ask: PlanAsk = {
+      id: askId,
+      at: new Date(this.now()).toISOString(),
+      questions: this.toPlanQuestions(questions),
+    };
+    await this.persistOrder(runId, (p) => ({
+      ...this.requireOrder(runId, p),
+      status: 'awaiting_input',
+      pendingAsk: ask,
+    }));
+    this.emitBoardChanged();
+    if (entry.mode === 'live') {
+      return new Promise<string>((resolve, reject) => {
+        this.state.pendingAsks.set(askId, { runId, resolve, reject });
+      });
+    }
+    entry.control.parkedAskId = askId;
+    setTimeout(() => entry.run.abort.abort(), 0);
+    return 'Questions recorded. Stop here — the operator will answer, then you will be re-prompted with their answers.';
+  }
+
+  /** Executor for `symphony_submit_order`: validate + persist the proposal, then end the run. */
+  private async onOrderSubmit(
+    runId: string,
+    entry: OrderRunEntry,
+    selectedIds: Set<string>,
+    submission: OrderSubmission,
+  ): Promise<{ ok: boolean; text: string }> {
+    const err = validateOrderSubmission(submission, selectedIds);
+    if (err)
+      return { ok: false, text: `${err} Call symphony_submit_order again with a corrected order.` };
+    const proposal: OrderProposal = {
+      order: submission.order,
+      tickets: submission.tickets.map((t) => ({
+        id: t.id,
+        blockedBy: t.blockedBy,
+        rationale: t.rationale,
+      })),
+      summary: submission.summary,
+    };
+    await this.persistOrder(runId, (p) => {
+      const base = this.requireOrder(runId, p);
+      return { ...base, status: 'ready', proposal, pendingAsk: null, revision: base.revision + 1 };
+    });
+    entry.control.submitted = true;
+    this.emitBoardChanged();
+    setTimeout(() => entry.run.abort.abort(), 0);
+    return { ok: true, text: 'Order recorded for operator review.' };
+  }
+
+  private async onOrderWorkerExit(runId: string, outcome: OrderOutcome): Promise<void> {
+    const entry = this.state.orderRuns.get(runId);
+    if (!entry) return;
+    this.state.orderRuns.delete(runId);
+    this.rejectPendingAsksForRun(runId, 'ordering run ended');
+    this.state.totals.secondsRunning += (this.now() - entry.run.startedAt) / 1000;
+    const log = this.logger.child({ run_id: runId });
+    // Carry the session forward for re-runs / pause-mode resume. (Tokens are folded into global
+    // totals by onAgentEvent; an ordering run has no single ticket to attribute per-issue usage to.)
+    if (entry.run.sessionId) {
+      const sid = entry.run.sessionId;
+      await this.persistOrder(runId, (p) => ({ ...this.requireOrder(runId, p), sessionId: sid }));
+    }
+    switch (outcome.kind) {
+      case 'ready':
+        log.info({}, 'order ready for review');
+        break;
+      case 'parked':
+        log.info({}, 'order parked for operator input (pause mode)');
+        break;
+      case 'aborted':
+        await this.persistOrder(runId, (p) => ({
+          ...this.requireOrder(runId, p),
+          status: p?.proposal ? 'ready' : 'failed',
+          pendingAsk: null,
+        }));
+        log.info({}, 'order run aborted/cancelled');
+        break;
+      case 'failed':
+        await this.persistOrder(runId, (p) => {
+          const base = this.requireOrder(runId, p);
+          const next: OrderRun = {
+            ...base,
+            status: 'failed',
+            pendingAsk: null,
+            error: outcome.error,
+          };
+          delete next.errorCategory;
+          if (outcome.category !== undefined) next.errorCategory = outcome.category;
+          return next;
+        });
+        log.warn({ error: outcome.error }, 'order run failed');
+        break;
+    }
+    this.emitBoardChanged();
+  }
+
   /**
    * Live re-point to a different project: rebuild the tracker / MCP / workspace from `next`, abort
    * every running agent, reset all run state, and resume polling — no process restart. Atomic: the
@@ -851,8 +1434,10 @@ export class Orchestrator {
       this.state.retryAttempts.clear();
       for (const entry of this.state.running.values()) entry.abort.abort();
       for (const entry of this.state.planRuns.values()) entry.run.abort.abort();
+      for (const entry of this.state.orderRuns.values()) entry.run.abort.abort();
       this.rejectAllPendingAsks('switching project');
       this.state.planRuns.clear();
+      this.state.orderRuns.clear();
       this.state.running.clear();
       this.state.claimed.clear();
       this.state.completed.clear();
@@ -889,7 +1474,10 @@ export class Orchestrator {
 
   /** Subscribe to a running session's live events; replays the buffer first. Returns unsubscribe. */
   subscribeLogs(issueId: string, cb: (ev: AgentEvent) => void): () => void {
-    const entry = this.state.running.get(issueId) ?? this.state.planRuns.get(issueId)?.run;
+    const entry =
+      this.state.running.get(issueId) ??
+      this.state.planRuns.get(issueId)?.run ??
+      this.state.orderRuns.get(issueId)?.run;
     if (entry) for (const ev of entry.eventBuffer) cb(ev);
     let set = this.logSubscribers.get(issueId);
     if (!set) {
@@ -926,7 +1514,10 @@ export class Orchestrator {
 
   /** Snapshot of a session's buffered events (execution or plan run). */
   getSessionLogs(issueId: string): AgentEvent[] {
-    const entry = this.state.running.get(issueId) ?? this.state.planRuns.get(issueId)?.run;
+    const entry =
+      this.state.running.get(issueId) ??
+      this.state.planRuns.get(issueId)?.run ??
+      this.state.orderRuns.get(issueId)?.run;
     return entry?.eventBuffer.slice() ?? [];
   }
 
@@ -1069,9 +1660,10 @@ export class Orchestrator {
   // ---- dispatch decisions ----
 
   private availableSlots(): number {
-    // Plan runs share the execution concurrency budget (so single_dir never overlaps a plan + an
-    // execution run in the same dir, and worktree mode respects max_concurrent_agents overall).
-    const busy = this.state.running.size + this.state.planRuns.size;
+    // Plan + order runs share the execution concurrency budget (so single_dir never overlaps two
+    // runs in the same dir, and worktree mode respects max_concurrent_agents overall). An order run
+    // holds ONE slot regardless of how many tickets it sequences.
+    const busy = this.state.running.size + this.state.planRuns.size + this.state.orderRuns.size;
     // single_dir mode runs ONE task at a time (the agent works directly in the project dir).
     if (this.config.workspace.mode === 'single_dir') return busy > 0 ? 0 : 1;
     return Math.max(this.config.agent.max_concurrent_agents - busy, 0);
@@ -1098,8 +1690,10 @@ export class Orchestrator {
     if (this.state.blocked.has(issue.id)) return false;
     if (this.paused.has(issue.id)) return false;
     if (this.runningCountForState(issue.state) >= this.maxForState(issue.state)) return false;
-    if (issue.state.toLowerCase() === 'todo' && todoBlockedByNonTerminal(issue, terminal))
-      return false;
+    // Sequencing dependency gate: skip a ticket whose blockers are not all terminal. Independent
+    // ready tickets later in the sort still dispatch (the loop continues, not breaks). `blockedBy`
+    // is `[]` for non-sequenced tickets, so this is inert until the Sequence feature populates it.
+    if (blockedByNonTerminal(issue, terminal)) return false;
     return true;
   }
 

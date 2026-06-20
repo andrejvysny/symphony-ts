@@ -13,6 +13,7 @@ export type {
   IssueActivity,
   IssueComment,
   PlanStore,
+  OrderStore,
 } from './tracker.js';
 export {
   supportsIssueCreation,
@@ -21,6 +22,8 @@ export {
   supportsIssueRemoval,
   supportsActivity,
   supportsPlanStore,
+  supportsOrderStore,
+  refreshBlockerStates,
 } from './tracker.js';
 export { MemoryTracker, type MemoryTrackerOptions } from './memory/memory-tracker.js';
 export { NullTracker } from './null/null-tracker.js';

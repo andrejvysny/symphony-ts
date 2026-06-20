@@ -241,6 +241,11 @@ function Card(props: {
       <div class="card-top">
         <span class="card-id">{i.identifier}</span>
         <span class="card-top-right">
+          {i.rank !== null && (
+            <span class="pill seq" title={`sequence position #${i.rank + 1}`}>
+              #{i.rank + 1}
+            </span>
+          )}
           {i.labels.includes('rework') && (
             <span class="pill rework" title="sent back for rework">
               rework
@@ -250,6 +255,12 @@ function Card(props: {
         </span>
       </div>
       <span class="card-title">{i.title}</span>
+
+      {i.blocked_by.length > 0 && (
+        <div class="card-deps" title={`blocked by ${i.blocked_by.join(', ')}`}>
+          <span class="dep-icon">⛓</span> needs {i.blocked_by.join(', ')}
+        </div>
+      )}
 
       {i.status === 'running' && session && (
         <>
